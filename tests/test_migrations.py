@@ -68,9 +68,9 @@ class MigrationTests(unittest.TestCase):
     def test_clean_database_is_created_without_backup(self) -> None:
         path = self.root / "clean.sqlite3"
         result = migrate_database(path)
-        self.assertEqual(result.applied_versions, (1, 2))
+        self.assertEqual(result.applied_versions, (1, 2, 3))
         self.assertIsNone(result.backup_path)
-        self.assertEqual(Database(path).schema_info(), (2, "release-a"))
+        self.assertEqual(Database(path).schema_info(), (3, "release-b"))
 
     def test_legacy_database_is_backed_up_and_preserved(self) -> None:
         path = self.root / "legacy.sqlite3"
@@ -94,7 +94,7 @@ class MigrationTests(unittest.TestCase):
         path = self.root / "current.sqlite3"
         Database(path).initialize()
         bad = Migration(
-            3,
+            4,
             "failure_test",
             (
                 "CREATE TABLE should_not_remain (id INTEGER)",
@@ -111,7 +111,7 @@ class MigrationTests(unittest.TestCase):
         version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
         connection.close()
         self.assertIsNone(exists)
-        self.assertEqual(version, 2)
+        self.assertEqual(version, 3)
 
     def test_verified_backup_can_be_restored(self) -> None:
         target = self.root / "target.sqlite3"

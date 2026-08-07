@@ -80,12 +80,46 @@ class AppsScriptCalendar:
                 "email": request.email,
                 "description": "\n".join(description_parts),
                 "location": request.location or "",
+                "allowOverlap": request.admin_override,
+                "transparent": not request.blocks_calendar,
             },
         )
         event_id = response.get("eventId")
         if not isinstance(event_id, str) or not event_id:
             raise CalendarUnavailable("Apps Script did not return an event ID")
         return event_id
+
+    async def update_event(self, request: MeetingRequest) -> str:
+        if not request.google_event_id:
+            raise CalendarUnavailable("Meeting has no Google event ID")
+        response = await asyncio.to_thread(
+            self._post,
+            {
+                "action": "update",
+                "eventId": request.google_event_id,
+                "start": request.start_at.astimezone(UTC).isoformat(),
+                "end": request.end_at.astimezone(UTC).isoformat(),
+                "subject": request.subject,
+                "description": request.description or "",
+                "location": request.location or "",
+                "allowOverlap": request.admin_override,
+                "transparent": not request.blocks_calendar,
+            },
+        )
+        event_id = response.get("eventId")
+        if not isinstance(event_id, str) or not event_id:
+            raise CalendarUnavailable("Apps Script did not return an updated event ID")
+        return event_id
+
+    async def delete_event(self, event_id: str) -> bool:
+        response = await asyncio.to_thread(
+            self._post,
+            {"action": "delete", "eventId": event_id},
+        )
+        deleted = response.get("deleted")
+        if not isinstance(deleted, bool):
+            raise CalendarUnavailable("Apps Script did not return deletion status")
+        return deleted
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         body = dict(payload)

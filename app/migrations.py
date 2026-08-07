@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 LOGGER = logging.getLogger(__name__)
-RELEASE_ID = "release-a"
+RELEASE_ID = "release-b"
 
 
 @dataclass(frozen=True)
@@ -121,6 +121,58 @@ MIGRATIONS = (
                 value TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
+            """,
+        ),
+    ),
+    Migration(
+        3,
+        "release_b_workflows",
+        (
+            "ALTER TABLE meeting_requests ADD COLUMN source TEXT NOT NULL DEFAULT 'USER'",
+            "ALTER TABLE meeting_requests ADD COLUMN blocks_calendar INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE meeting_requests ADD COLUMN admin_override INTEGER NOT NULL DEFAULT 0",
+            """
+            CREATE TABLE IF NOT EXISTS request_alternatives (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_id INTEGER NOT NULL REFERENCES meeting_requests(id),
+                start_at TEXT NOT NULL,
+                end_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                hold_until TEXT NOT NULL,
+                created_by INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                responded_at TEXT
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_alternatives_request
+            ON request_alternatives(request_id, status, created_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_alternatives_slot
+            ON request_alternatives(start_at, end_at, status, hold_until)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS change_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_id INTEGER NOT NULL REFERENCES meeting_requests(id),
+                change_type TEXT NOT NULL,
+                proposed_start_at TEXT,
+                proposed_end_at TEXT,
+                status TEXT NOT NULL,
+                requested_by INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_change_one_open
+            ON change_requests(request_id)
+            WHERE status IN ('PENDING', 'APPROVING')
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_change_status
+            ON change_requests(status, created_at)
             """,
         ),
     ),

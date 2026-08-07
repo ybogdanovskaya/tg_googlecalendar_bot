@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from app.db import Database, RequestNotEditableError, SlotConflictError
+from app.models import CANCELLED_BY_ADMIN, CHANGE_CANCEL, CHANGE_RESCHEDULE
 
 
 class DatabaseTests(unittest.TestCase):
@@ -109,8 +110,8 @@ class DatabaseTests(unittest.TestCase):
 
     def test_schema_is_versioned(self) -> None:
         version, release = self.db.schema_info()
-        self.assertEqual(version, 2)
-        self.assertEqual(release, "release-a")
+        self.assertEqual(version, 3)
+        self.assertEqual(release, "release-b")
 
     def test_latest_requests_are_displayed_with_newest_at_bottom(self) -> None:
         base = datetime(2026, 8, 11, 9, 0, tzinfo=UTC)
@@ -118,6 +119,64 @@ class DatabaseTests(unittest.TestCase):
             self.create(base + timedelta(hours=index), 30)
         recent = self.db.list_user_requests(100, limit=3)
         self.assertEqual([item.id for item in recent], [2, 3, 4])
+
+    def test_user_accepts_one_of_admin_alternatives(self) -> None:
+        request = self.create(datetime(2026, 8, 12, 9, 0, tzinfo=UTC))
+        alternative = self.db.create_alternative(
+            request.id,
+            1,
+            datetime(2026, 8, 12, 11, 0, tzinfo=UTC),
+            datetime(2026, 8, 12, 11, 45, tzinfo=UTC),
+            24,
+        )
+        updated = self.db.accept_alternative(alternative.id, 100, 24)
+        self.assertEqual(updated.start_at, datetime(2026, 8, 12, 11, 0, tzinfo=UTC))
+        self.assertEqual(self.db.list_offered_alternatives(request.id), [])
+
+    def test_approved_meeting_change_requires_admin_completion(self) -> None:
+        request = self.create(datetime(2026, 8, 13, 9, 0, tzinfo=UTC))
+        self.db.claim_for_approval(request.id, 1)
+        approved = self.db.complete_approval(request.id, 1, "event-id")
+        change = self.db.create_change_request(approved.id, 100, CHANGE_CANCEL)
+        self.assertEqual(self.db.get_request(approved.id).status, "APPROVED")
+        self.db.claim_change(change.id, 1)
+        _, cancelled = self.db.complete_change(change.id, 1)
+        self.assertEqual(cancelled.status, CANCELLED_BY_ADMIN)
+
+    def test_reschedule_change_updates_approved_meeting(self) -> None:
+        request = self.create(datetime(2026, 8, 14, 9, 0, tzinfo=UTC))
+        self.db.claim_for_approval(request.id, 1)
+        approved = self.db.complete_approval(request.id, 1, "event-id")
+        change = self.db.create_change_request(
+            approved.id,
+            100,
+            CHANGE_RESCHEDULE,
+            datetime(2026, 8, 14, 12, 0, tzinfo=UTC),
+            datetime(2026, 8, 14, 12, 30, tzinfo=UTC),
+        )
+        self.db.claim_change(change.id, 1)
+        _, moved = self.db.complete_change(change.id, 1)
+        self.assertEqual(moved.start_at, datetime(2026, 8, 14, 12, 0, tzinfo=UTC))
+
+    def test_only_admin_override_allows_manual_overlap(self) -> None:
+        self.create(datetime(2026, 8, 15, 9, 0, tzinfo=UTC), 60)
+        values = dict(
+            admin_id=100,
+            admin_name="Admin",
+            admin_username=None,
+            email=None,
+            subject="Manual",
+            description=None,
+            location=None,
+            start_at=datetime(2026, 8, 15, 9, 30, tzinfo=UTC),
+            end_at=datetime(2026, 8, 15, 10, 0, tzinfo=UTC),
+            blocks_calendar=True,
+        )
+        with self.assertRaises(SlotConflictError):
+            self.db.create_admin_draft(**values, allow_overlap=False)
+        draft = self.db.create_admin_draft(**values, allow_overlap=True)
+        self.assertTrue(draft.admin_override)
+        self.assertEqual(draft.source, "ADMIN")
 
 
 if __name__ == "__main__":

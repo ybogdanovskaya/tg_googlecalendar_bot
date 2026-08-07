@@ -22,6 +22,12 @@ function doPost(e) {
     if (payload.action === 'create') {
       return jsonResponse_({ok: true, eventId: createEvent_(payload)});
     }
+    if (payload.action === 'update') {
+      return jsonResponse_({ok: true, eventId: updateEvent_(payload)});
+    }
+    if (payload.action === 'delete') {
+      return jsonResponse_({ok: true, deleted: deleteEvent_(payload)});
+    }
     throw new Error('unknown_action');
   } catch (error) {
     return jsonResponse_({
@@ -53,7 +59,6 @@ function createEvent_(payload) {
   validateRange_(start, end);
   requireText_(payload.requestId, 'request_id_required', 100);
   requireText_(payload.subject, 'subject_required', 200);
-  requireText_(payload.email, 'email_required', 254);
 
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(10000)) {
@@ -69,22 +74,79 @@ function createEvent_(payload) {
     if (existing) {
       return existing.getId();
     }
-    if (events.some(isBlocking_)) {
+    if (!payload.allowOverlap && events.some(isBlocking_)) {
       throw new Error('slot_busy');
     }
 
     const options = {
       description: String(payload.description || ''),
       location: String(payload.location || ''),
-      guests: String(payload.email),
-      sendInvites: true,
     };
+    if (String(payload.email || '').trim()) {
+      options.guests = String(payload.email).trim();
+      options.sendInvites = true;
+    }
     const event = calendar.createEvent(String(payload.subject), start, end, options);
     event.setTag('telegram_request_id', String(payload.requestId));
-    event.setTransparency(CalendarApp.EventTransparency.OPAQUE);
+    event.setTransparency(payload.transparent
+      ? CalendarApp.EventTransparency.TRANSPARENT
+      : CalendarApp.EventTransparency.OPAQUE);
     event.setGuestsCanModify(false);
     event.setGuestsCanInviteOthers(false);
     return event.getId();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function updateEvent_(payload) {
+  const start = parseDate_(payload.start);
+  const end = parseDate_(payload.end);
+  validateRange_(start, end);
+  requireText_(payload.eventId, 'event_id_required', 300);
+  requireText_(payload.subject, 'subject_required', 200);
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    throw new Error('calendar_busy_try_again');
+  }
+  try {
+    const calendar = CalendarApp.getDefaultCalendar();
+    const event = calendar.getEventById(String(payload.eventId));
+    if (!event) {
+      throw new Error('event_not_found');
+    }
+    const conflicts = calendar.getEvents(start, end).filter(function(item) {
+      return item.getId() !== event.getId() && isBlocking_(item);
+    });
+    if (!payload.allowOverlap && conflicts.length) {
+      throw new Error('slot_busy');
+    }
+    event.setTitle(String(payload.subject));
+    event.setTime(start, end);
+    event.setDescription(String(payload.description || ''));
+    event.setLocation(String(payload.location || ''));
+    event.setTransparency(payload.transparent
+      ? CalendarApp.EventTransparency.TRANSPARENT
+      : CalendarApp.EventTransparency.OPAQUE);
+    return event.getId();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function deleteEvent_(payload) {
+  requireText_(payload.eventId, 'event_id_required', 300);
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    throw new Error('calendar_busy_try_again');
+  }
+  try {
+    const event = CalendarApp.getDefaultCalendar().getEventById(String(payload.eventId));
+    if (!event) {
+      return false;
+    }
+    event.deleteEvent();
+    return true;
   } finally {
     lock.releaseLock();
   }
