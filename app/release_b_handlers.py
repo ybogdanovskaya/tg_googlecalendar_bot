@@ -13,11 +13,13 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 
 from app.booking_rules import load_rules
+from app.automation_store import AutomationStore
 from app.bot import EMAIL_RE, _keyboard, cancel_keyboard, format_request, home_keyboard
 from app.calendar_client import CalendarClient, CalendarUnavailable
 from app.config import Settings
 from app.db import Database, RequestNotEditableError, SlotConflictError
 from app.models import CHANGE_CANCEL, CHANGE_RESCHEDULE, PENDING
+from app.notification_rules import load_notification_rules
 
 
 class ReleaseBFlow(StatesGroup):
@@ -38,7 +40,12 @@ class ReleaseBFlow(StatesGroup):
 LOGGER = logging.getLogger(__name__)
 
 
-def create_release_b_router(settings: Settings, db: Database, calendar: CalendarClient) -> Router:
+def create_release_b_router(
+    settings: Settings,
+    db: Database,
+    calendar: CalendarClient,
+    automation: AutomationStore | None = None,
+) -> Router:
     router = Router(name="release-b")
     zone = ZoneInfo(settings.timezone)
 
@@ -467,6 +474,20 @@ def create_release_b_router(settings: Settings, db: Database, calendar: Calendar
                 moved = replace(request, start_at=change.proposed_start_at, end_at=change.proposed_end_at)
                 await calendar.update_event(moved)
             _, updated = await asyncio.to_thread(db.complete_change, change.id, callback.from_user.id)
+            if automation:
+                try:
+                    if change.change_type == CHANGE_CANCEL:
+                        await asyncio.to_thread(automation.cancel_request_jobs, updated.id)
+                    else:
+                        notification_rules = load_notification_rules(db, settings)
+                        await asyncio.to_thread(
+                            automation.rebuild_request_reminders,
+                            updated.id,
+                            settings.admin_telegram_id,
+                            notification_rules.reminder_minutes,
+                        )
+                except Exception:
+                    LOGGER.exception("change_reminder_rebuild_failed", extra={"request_id": updated.id})
         except Exception:
             LOGGER.exception("meeting_change_approval_failed", extra={"change_id": change.id})
             await asyncio.to_thread(db.reset_change, change.id, "google_error")
@@ -772,6 +793,17 @@ def create_release_b_router(settings: Settings, db: Database, calendar: Calendar
             try:
                 event_id = await calendar.create_event(draft)
                 created = await asyncio.to_thread(db.complete_approval, draft.id, callback.from_user.id, event_id)
+                if automation:
+                    try:
+                        notification_rules = load_notification_rules(db, settings)
+                        await asyncio.to_thread(
+                            automation.rebuild_request_reminders,
+                            created.id,
+                            settings.admin_telegram_id,
+                            notification_rules.reminder_minutes,
+                        )
+                    except Exception:
+                        LOGGER.exception("manual_reminder_schedule_failed", extra={"request_id": created.id})
             except Exception:
                 await asyncio.to_thread(db.fail_admin_draft, draft.id, "calendar_create_failed")
                 raise

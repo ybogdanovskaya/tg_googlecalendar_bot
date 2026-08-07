@@ -420,9 +420,82 @@ class AutomationStore:
         due = request.created_at + timedelta(hours=interval_hours)
         if due < current:
             due = current
-        key = f"pending:{request.id}:{due.date().isoformat()}:{admin_id}"
+        key = f"pending:{request.id}:{due.isoformat()}:{admin_id}"
         with self.db._connect() as connection:
             return self._insert_job(connection, JOB_PENDING_REMINDER, request.id, None, admin_id, due, key, current)
+
+    def schedule_next_pending_reminder(
+        self,
+        request_id: int,
+        admin_id: int,
+        interval_hours: int,
+        after: datetime | None = None,
+    ) -> int:
+        current = after or datetime.now(UTC)
+        request = self.db.get_request(request_id)
+        if request is None or request.status != PENDING:
+            return 0
+        due = current + timedelta(hours=interval_hours)
+        key = f"pending:{request.id}:{due.isoformat()}:{admin_id}"
+        with self.db._connect() as connection:
+            return self._insert_job(connection, JOB_PENDING_REMINDER, request.id, None, admin_id, due, key, current)
+
+    def cancel_request_jobs(self, request_id: int) -> None:
+        with self.db._connect() as connection:
+            self._cancel_jobs_for_request(connection, request_id, _iso(datetime.now(UTC)))
+
+    def bootstrap_jobs(
+        self,
+        admin_id: int,
+        reminder_minutes: Iterable[int],
+        pending_interval_hours: int,
+        now: datetime | None = None,
+    ) -> dict[str, int]:
+        current = now or datetime.now(UTC)
+        with self.db._connect() as connection:
+            approved = [
+                int(row["id"])
+                for row in connection.execute(
+                    "SELECT id FROM meeting_requests WHERE status = ? AND start_at > ?",
+                    (APPROVED, _iso(current)),
+                ).fetchall()
+            ]
+            pending = [
+                int(row["id"])
+                for row in connection.execute(
+                    "SELECT id FROM meeting_requests WHERE status = ?",
+                    (PENDING,),
+                ).fetchall()
+            ]
+            occurrences = [
+                (int(row["id"]), int(row["created_by"]))
+                for row in connection.execute(
+                    """
+                    SELECT o.id, s.created_by FROM event_occurrences AS o
+                    JOIN event_series AS s ON s.id = o.series_id
+                    WHERE s.status = ? AND o.status IN (?, ?) AND o.actual_start_at > ?
+                    """,
+                    (SERIES_ACTIVE, OCCURRENCE_SCHEDULED, OCCURRENCE_MOVED, _iso(current)),
+                ).fetchall()
+            ]
+        request_jobs = sum(
+            self.rebuild_request_reminders(item, admin_id, reminder_minutes, current)
+            for item in approved
+        )
+        pending_jobs = sum(
+            self.ensure_pending_reminder(item, admin_id, pending_interval_hours, current)
+            for item in pending
+        )
+        occurrence_jobs = sum(
+            self.rebuild_occurrence_reminders(item, owner, reminder_minutes, current)
+            for item, owner in occurrences
+        )
+        return {
+            "requests": len(approved),
+            "pending": len(pending),
+            "occurrences": len(occurrences),
+            "jobs": request_jobs + pending_jobs + occurrence_jobs,
+        }
 
     def claim_due_jobs(self, now: datetime | None = None, limit: int = 20) -> list[ScheduledJob]:
         current = now or datetime.now(UTC)

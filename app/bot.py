@@ -26,10 +26,12 @@ from app.booking_rules import (
     load_rules,
     validate_value,
 )
+from app.automation_store import AutomationStore
 from app.calendar_client import CalendarClient, CalendarUnavailable
 from app.config import Settings
 from app.db import Database, RequestNotEditableError, SlotConflictError
 from app.models import APPROVED, APPROVING, CANCELLED, CANCELLED_BY_ADMIN, PENDING, REJECTED, MeetingRequest
+from app.notification_rules import load_notification_rules
 from app.slots import available_slots
 
 
@@ -195,7 +197,12 @@ def _request_edit_keyboard(request_id: int, include_home: bool = True) -> Inline
     return _keyboard(rows)
 
 
-def create_router(settings: Settings, db: Database, calendar: CalendarClient) -> Router:
+def create_router(
+    settings: Settings,
+    db: Database,
+    calendar: CalendarClient,
+    automation: AutomationStore | None = None,
+) -> Router:
     router = Router()
     zone = ZoneInfo(settings.timezone)
 
@@ -867,6 +874,17 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
             await callback.answer("Google Calendar недоступен", show_alert=True)
             return
         await state.clear()
+        if automation:
+            try:
+                notification_rules = load_notification_rules(db, settings)
+                await asyncio.to_thread(
+                    automation.ensure_pending_reminder,
+                    request.id,
+                    settings.admin_telegram_id,
+                    notification_rules.pending_reminder_hours,
+                )
+            except Exception:
+                LOGGER.exception("pending_reminder_schedule_failed", extra={"request_id": request.id})
         await callback.answer("Заявка отправлена")
         await callback.message.edit_text(
             format_request(request, settings.timezone, include_private=False)
@@ -1061,6 +1079,11 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
             await callback.answer("Заявку уже нельзя отменить", show_alert=True)
             return
         request = db.get_request(request_id)
+        if automation:
+            try:
+                await asyncio.to_thread(automation.cancel_request_jobs, request_id)
+            except Exception:
+                LOGGER.exception("cancelled_request_jobs_cleanup_failed", extra={"request_id": request_id})
         await callback.answer("Заявка отменена")
         if callback.message and request:
             await callback.message.edit_text(
@@ -1336,6 +1359,11 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
         if request is None:
             await callback.answer("Заявка уже обработана", show_alert=True)
             return
+        if automation:
+            try:
+                await asyncio.to_thread(automation.cancel_request_jobs, request.id)
+            except Exception:
+                LOGGER.exception("rejected_request_jobs_cleanup_failed", extra={"request_id": request.id})
         await callback.answer("Заявка отклонена")
         if callback.message:
             await callback.message.edit_text(format_request(request, settings.timezone))
@@ -1376,6 +1404,17 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
                 callback.from_user.id,
                 event_id,
             )
+            if automation:
+                try:
+                    notification_rules = load_notification_rules(db, settings)
+                    await asyncio.to_thread(
+                        automation.rebuild_request_reminders,
+                        approved.id,
+                        settings.admin_telegram_id,
+                        notification_rules.reminder_minutes,
+                    )
+                except Exception:
+                    LOGGER.exception("meeting_reminder_schedule_failed", extra={"request_id": approved.id})
         except CalendarUnavailable:
             await asyncio.to_thread(db.reset_approval, request_id, "google_unavailable")
             if callback.message:

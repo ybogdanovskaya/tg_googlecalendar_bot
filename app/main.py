@@ -10,6 +10,8 @@ from aiogram.fsm.storage.memory import SimpleEventIsolation
 from aiogram.types import BotCommand, MenuButtonCommands
 
 from app.apps_script_calendar import AppsScriptCalendar
+from app.automation import automation_loop
+from app.automation_store import AutomationStore
 from app.bot import create_router
 from app.config import Settings
 from app.db import Database
@@ -43,6 +45,7 @@ async def run() -> None:
     configure_logging(settings.log_path)
     database = Database(settings.database_path)
     database.initialize()
+    automation = AutomationStore(database)
     schema_version, release_id = database.schema_info()
     LOGGER.info(
         "database_ready",
@@ -62,13 +65,19 @@ async def run() -> None:
         calendar = GoogleCalendar(settings.google_token_file, settings.google_calendar_id)
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dispatcher = Dispatcher(events_isolation=SimpleEventIsolation())
-    dispatcher.include_router(create_release_b_router(settings, database, calendar))
-    dispatcher.include_router(create_router(settings, database, calendar))
+    dispatcher.include_router(create_release_b_router(settings, database, calendar, automation))
+    dispatcher.include_router(create_router(settings, database, calendar, automation))
     await configure_bot_menu(bot)
     LOGGER.info("bot_starting")
+    automation_task = asyncio.create_task(
+        automation_loop(bot, automation, calendar, settings),
+        name="calendar-automation",
+    )
     try:
         await dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types())
     finally:
+        automation_task.cancel()
+        await asyncio.gather(automation_task, return_exceptions=True)
         await bot.session.close()
         LOGGER.info("bot_stopped")
 

@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from app.apps_script_calendar import AppsScriptCalendar
-from app.models import MeetingRequest
+from app.models import EventOccurrence, EventSeries, MeetingRequest
 
 
 class AppsScriptCalendarTests(unittest.IsolatedAsyncioTestCase):
@@ -76,6 +76,56 @@ class AppsScriptCalendarTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(captured[0]["email"], "")
             self.assertTrue(captured[0]["allowOverlap"])
             self.assertTrue(captured[0]["transparent"])
+
+    async def test_event_status_and_series_operations_are_parsed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            secret_file = Path(temporary) / "secret"
+            secret_file.write_text("test-secret", encoding="utf-8")
+            client = AppsScriptCalendar("https://script.google.com/macros/s/example/exec", secret_file)
+            captured = []
+
+            def post(payload):
+                captured.append(payload)
+                if payload["action"] == "status":
+                    return {
+                        "ok": True,
+                        "exists": True,
+                        "start": "2026-08-20T06:00:00Z",
+                        "end": "2026-08-20T06:30:00Z",
+                        "subject": "Changed",
+                        "description": "Details",
+                        "location": "Office",
+                        "transparent": False,
+                        "updated": "2026-08-07T10:00:00Z",
+                    }
+                if payload["action"] in {"seriesCreate", "seriesUpdate", "occurrenceUpdate"}:
+                    return {"ok": True, "eventId": "series-id"}
+                return {"ok": True, "deleted": True}
+
+            client._post = post
+            state = await client.event_state("event-id")
+            self.assertTrue(state.exists)
+            self.assertEqual(state.subject, "Changed")
+            now = datetime(2026, 8, 20, 6, 0, tzinfo=UTC)
+            series = EventSeries(
+                1, 1, "Admin", "admin", None, "Daily", None, None,
+                now, now + timedelta(minutes=30), "DAILY", "2026-08-22", "ACTIVE",
+                "series-id", True, False, "SYNCED", None, now, now,
+            )
+            occurrence = EventOccurrence(
+                1, 1, now, now + timedelta(minutes=30), now, now + timedelta(minutes=30),
+                "SCHEDULED", "series-id", now, now,
+            )
+            self.assertEqual(await client.create_series(series), "series-id")
+            self.assertEqual(await client.update_series(series), "series-id")
+            self.assertEqual(
+                await client.update_occurrence("series-id", occurrence, now + timedelta(hours=1), now + timedelta(hours=1, minutes=30)),
+                "series-id",
+            )
+            self.assertTrue(await client.delete_occurrence("series-id", occurrence))
+            self.assertTrue(await client.delete_series("series-id"))
+            actions = [item["action"] for item in captured]
+            self.assertEqual(actions, ["status", "seriesCreate", "seriesUpdate", "occurrenceUpdate", "occurrenceDelete", "seriesDelete"])
 
 
 if __name__ == "__main__":
