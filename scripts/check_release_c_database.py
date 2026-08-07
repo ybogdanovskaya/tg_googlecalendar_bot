@@ -29,6 +29,22 @@ def main() -> None:
                 ).fetchall()
             ),
             "series": int(connection.execute("SELECT COUNT(*) FROM event_series").fetchone()[0]),
+            "series_statuses": dict(
+                connection.execute(
+                    "SELECT status, COUNT(*) FROM event_series GROUP BY status ORDER BY status"
+                ).fetchall()
+            ),
+            "series_records": [
+                {
+                    "id": int(row[0]),
+                    "status": str(row[1]),
+                    "has_google_id": bool(row[2]),
+                    "created_at": str(row[3]),
+                }
+                for row in connection.execute(
+                    "SELECT id, status, google_series_id, created_at FROM event_series ORDER BY id"
+                ).fetchall()
+            ],
             "jobs": dict(
                 connection.execute(
                     "SELECT status, COUNT(*) FROM scheduled_jobs GROUP BY status ORDER BY status"
