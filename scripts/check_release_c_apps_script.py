@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -32,8 +33,18 @@ def main() -> None:
             raise RuntimeError(str(error))
         return result
 
+    def wait_for_occurrence(payload: dict[str, object], expected_exists: bool) -> dict[str, object]:
+        last: dict[str, object] = {}
+        for attempt in range(4):
+            last = post(payload)
+            if last.get("exists") is expected_exists:
+                return last
+            if attempt < 3:
+                time.sleep(3)
+        return last
+
     # Прозрачная тестовая серия создаётся далеко за рабочим горизонтом и удаляется в finally.
-    start = datetime.now(UTC) + timedelta(days=400)
+    start = datetime.now(UTC) + timedelta(days=300)
     start = start.replace(hour=8, minute=0, second=0, microsecond=0)
     end = start + timedelta(minutes=15)
     until = (start + timedelta(days=2)).date().isoformat()
@@ -78,13 +89,14 @@ def main() -> None:
         if str(updated.get("eventId") or "") != series_id:
             raise RuntimeError("series_update_returned_another_event_id")
 
-        initial_state = post(
+        initial_state = wait_for_occurrence(
             {
                 "action": "occurrenceStatus",
                 "eventId": series_id,
                 "lookupStart": shifted.isoformat(),
                 "expectedStart": shifted.isoformat(),
-            }
+            },
+            True,
         )
         if initial_state.get("exists") is not True:
             raise RuntimeError("first_occurrence_not_found")
@@ -101,13 +113,14 @@ def main() -> None:
         )
         if not str(occurrence_update.get("eventId") or ""):
             raise RuntimeError("occurrence_update_did_not_return_event_id")
-        moved_state = post(
+        moved_state = wait_for_occurrence(
             {
                 "action": "occurrenceStatus",
                 "eventId": series_id,
                 "lookupStart": moved.isoformat(),
                 "expectedStart": shifted.isoformat(),
-            }
+            },
+            True,
         )
         if moved_state.get("exists") is not True or str(moved_state.get("start") or "") != moved.isoformat().replace("+00:00", "Z"):
             raise RuntimeError("moved_occurrence_status_is_invalid")
@@ -122,13 +135,14 @@ def main() -> None:
         )
         if deleted.get("deleted") is not True:
             raise RuntimeError("occurrence_delete_was_not_confirmed")
-        deleted_state = post(
+        deleted_state = wait_for_occurrence(
             {
                 "action": "occurrenceStatus",
                 "eventId": series_id,
                 "lookupStart": second.isoformat(),
                 "expectedStart": second.isoformat(),
-            }
+            },
+            False,
         )
         if deleted_state.get("exists") is not False:
             raise RuntimeError("deleted_occurrence_still_exists")
