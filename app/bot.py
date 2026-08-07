@@ -1135,7 +1135,7 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
                 [InlineKeyboardButton(text="← Настройки", callback_data="admin:settings")],
             ]
         )
-        text = "Закрытые даты (ближайшие 30):" if values else "Закрытых будущих дат нет."
+        text = "Ближайшие закрытые даты:" if values else "Закрытых будущих дат нет."
         await callback.answer()
         if callback.message:
             await callback.message.answer(text, reply_markup=_keyboard(rows))
