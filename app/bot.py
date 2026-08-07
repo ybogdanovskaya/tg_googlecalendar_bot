@@ -417,7 +417,8 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
                         [
                             InlineKeyboardButton(text="✅ Согласовать", callback_data=f"approve:{request.id}"),
                             InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject:{request.id}"),
-                        ]
+                        ],
+                        [InlineKeyboardButton(text="✏️ Изменить / предложить время", callback_data=f"b:admin:req:{request.id}")],
                     ]
                 ),
             )
@@ -886,7 +887,8 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
                         [
                             InlineKeyboardButton(text="✅ Согласовать", callback_data=f"approve:{request.id}"),
                             InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject:{request.id}"),
-                        ]
+                        ],
+                        [InlineKeyboardButton(text="✏️ Изменить / предложить время", callback_data=f"b:admin:req:{request.id}")],
                     ]
                 ),
             )

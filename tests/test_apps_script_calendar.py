@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from app.apps_script_calendar import AppsScriptCalendar
@@ -51,6 +51,29 @@ class AppsScriptCalendarTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(await client.update_event(meeting), "event-id")
             self.assertTrue(await client.delete_event("event-id"))
+            self.assertTrue(captured[0]["allowOverlap"])
+            self.assertTrue(captured[0]["transparent"])
+
+    async def test_manual_self_only_create_has_no_guest_and_can_be_transparent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            secret_file = Path(temporary) / "secret"
+            secret_file.write_text("test-secret", encoding="utf-8")
+            client = AppsScriptCalendar("https://script.google.com/macros/s/example/exec", secret_file)
+            captured = []
+
+            def post(payload):
+                captured.append(payload)
+                return {"ok": True, "eventId": "manual-event"}
+
+            client._post = post
+            now = datetime(2026, 8, 8, 6, 0, tzinfo=UTC)
+            meeting = MeetingRequest(
+                1, 100, "Admin", None, "", "Manual", None, None,
+                now, now + timedelta(minutes=30), "APPROVING", now, None, now, now,
+                source="ADMIN", blocks_calendar=False, admin_override=True,
+            )
+            self.assertEqual(await client.create_event(meeting), "manual-event")
+            self.assertEqual(captured[0]["email"], "")
             self.assertTrue(captured[0]["allowOverlap"])
             self.assertTrue(captured[0]["transparent"])
 
