@@ -82,7 +82,7 @@ def main() -> None:
         verify_sqlite(args.database)
         checks["database"] = "ok"
     except Exception as exc:
-        failures.append(str(exc))
+        failures.append(f"database:{type(exc).__name__}:{exc}")
         checks["database"] = "failed"
 
     if args.token:
@@ -94,7 +94,7 @@ def main() -> None:
         try:
             checks["backup"] = str(newest_backup(args.backup_dir, args.max_backup_age_hours).name)
         except Exception as exc:
-            failures.append(str(exc))
+            failures.append(f"backup:{type(exc).__name__}:{exc}")
             checks["backup"] = "failed"
 
     free = shutil.disk_usage(args.database.parent).free
