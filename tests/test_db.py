@@ -133,6 +133,53 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(updated.start_at, datetime(2026, 8, 12, 11, 0, tzinfo=UTC))
         self.assertEqual(self.db.list_offered_alternatives(request.id), [])
 
+    def test_alternatives_are_limited_expire_and_accept_only_once(self) -> None:
+        request = self.create(datetime(2026, 8, 12, 9, 0, tzinfo=UTC))
+        alternatives = []
+        for hour in (11, 12, 13):
+            alternatives.append(
+                self.db.create_alternative(
+                    request.id,
+                    1,
+                    datetime(2026, 8, 12, hour, 0, tzinfo=UTC),
+                    datetime(2026, 8, 12, hour, 30, tzinfo=UTC),
+                    24,
+                )
+            )
+        with self.assertRaises(ValueError):
+            self.db.create_alternative(
+                request.id,
+                1,
+                datetime(2026, 8, 12, 14, 0, tzinfo=UTC),
+                datetime(2026, 8, 12, 14, 30, tzinfo=UTC),
+                24,
+            )
+        self.db.accept_alternative(alternatives[0].id, 100, 24)
+        with self.assertRaises(RequestNotEditableError):
+            self.db.accept_alternative(alternatives[1].id, 100, 24)
+
+        expired_request = self.create(datetime(2026, 8, 13, 9, 0, tzinfo=UTC))
+        expired = self.db.create_alternative(
+            expired_request.id,
+            1,
+            datetime(2026, 8, 13, 11, 0, tzinfo=UTC),
+            datetime(2026, 8, 13, 11, 30, tzinfo=UTC),
+            -1,
+        )
+        with self.assertRaises(RequestNotEditableError):
+            self.db.accept_alternative(expired.id, 100, 24)
+
+    def test_admin_text_edit_does_not_change_time(self) -> None:
+        request = self.create(datetime(2026, 8, 12, 9, 0, tzinfo=UTC))
+        updated = self.db.admin_update_pending_details(
+            request.id,
+            1,
+            {"subject": "New subject", "description": "New details"},
+        )
+        self.assertEqual(updated.subject, "New subject")
+        self.assertEqual(updated.start_at, request.start_at)
+        self.assertEqual(updated.end_at, request.end_at)
+
     def test_approved_meeting_change_requires_admin_completion(self) -> None:
         request = self.create(datetime(2026, 8, 13, 9, 0, tzinfo=UTC))
         self.db.claim_for_approval(request.id, 1)
@@ -142,6 +189,20 @@ class DatabaseTests(unittest.TestCase):
         self.db.claim_change(change.id, 1)
         _, cancelled = self.db.complete_change(change.id, 1)
         self.assertEqual(cancelled.status, CANCELLED_BY_ADMIN)
+        with self.assertRaises(RequestNotEditableError):
+            self.db.complete_change(change.id, 1)
+
+    def test_only_one_open_change_request_is_allowed_and_claim_can_be_reset(self) -> None:
+        request = self.create(datetime(2026, 8, 13, 10, 0, tzinfo=UTC))
+        self.db.claim_for_approval(request.id, 1)
+        approved = self.db.complete_approval(request.id, 1, "event-id")
+        change = self.db.create_change_request(approved.id, 100, CHANGE_CANCEL)
+        with self.assertRaises(RequestNotEditableError):
+            self.db.create_change_request(approved.id, 100, CHANGE_CANCEL)
+        self.assertIsNotNone(self.db.claim_change(change.id, 1))
+        self.assertIsNone(self.db.claim_change(change.id, 1))
+        self.db.reset_change(change.id, "test_failure")
+        self.assertIsNotNone(self.db.claim_change(change.id, 1))
 
     def test_reschedule_change_updates_approved_meeting(self) -> None:
         request = self.create(datetime(2026, 8, 14, 9, 0, tzinfo=UTC))
@@ -177,6 +238,9 @@ class DatabaseTests(unittest.TestCase):
         draft = self.db.create_admin_draft(**values, allow_overlap=True)
         self.assertTrue(draft.admin_override)
         self.assertEqual(draft.source, "ADMIN")
+        self.db.complete_approval(draft.id, 100, "manual-event")
+        with self.assertRaises(RuntimeError):
+            self.db.complete_approval(draft.id, 100, "manual-event")
 
     def test_nonblocking_admin_event_does_not_hide_slot(self) -> None:
         start = datetime(2026, 8, 16, 9, 0, tzinfo=UTC)
