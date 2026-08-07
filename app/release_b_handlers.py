@@ -37,6 +37,8 @@ class ReleaseBFlow(StatesGroup):
     manual_description = State()
     manual_location = State()
     manual_review = State()
+    manual_edit_date = State()
+    manual_edit_value = State()
 
 
 LOGGER = logging.getLogger(__name__)
@@ -88,10 +90,11 @@ def create_release_b_router(
                 "alternative": ReleaseBFlow.alternative_date.state,
                 "move": ReleaseBFlow.move_date.state,
                 "manual": ReleaseBFlow.manual_date.state,
+                "manualedit": ReleaseBFlow.manual_edit_date.state,
             }
             if kind not in expected_states or await state.get_state() != expected_states[kind]:
                 raise ValueError
-            if kind in {"alternative", "manual"} and not is_admin(callback.from_user.id):
+            if kind in {"alternative", "manual", "manualedit"} and not is_admin(callback.from_user.id):
                 await callback.answer("Нет доступа", show_alert=True)
                 return
             today = datetime.now(zone).date()
@@ -117,6 +120,23 @@ def create_release_b_router(
                 raise ValueError
         except (KeyError, TypeError, ValueError):
             await callback.answer("Дата недоступна. Откройте календарь заново.", show_alert=True)
+            return
+        if kind == "manualedit":
+            data = await state.get_data()
+            try:
+                current = datetime.fromisoformat(str(data["start_at"])).astimezone(zone)
+                changed = datetime.combine(selected, current.timetz().replace(tzinfo=None), zone)
+                if changed <= datetime.now(zone):
+                    raise ValueError
+            except (KeyError, TypeError, ValueError):
+                await callback.answer("Выберите будущее время встречи.", show_alert=True)
+                return
+            await state.update_data(day=selected.isoformat(), start_at=changed.isoformat())
+            await state.set_state(ReleaseBFlow.manual_review)
+            await callback.answer(f"Выбрано: {selected:%d.%m.%Y}")
+            if callback.message:
+                await callback.message.edit_reply_markup(reply_markup=None)
+                await render_manual_review(callback.message, state)
             return
         await state.update_data(day=selected.isoformat())
         next_states = {
@@ -644,6 +664,43 @@ def create_release_b_router(
             return True
         return not await calendar.is_free(start, end)
 
+    async def render_manual_review(message: Message, state: FSMContext) -> None:
+        data = await state.get_data()
+        try:
+            start = datetime.fromisoformat(str(data["start_at"]))
+            end = start + timedelta(minutes=int(data["duration"]))
+            conflict = await manual_conflict(start, end)
+        except (KeyError, TypeError, ValueError):
+            await state.clear()
+            await message.answer("Черновик устарел. Начните создание встречи заново.", reply_markup=home_keyboard())
+            return
+        except CalendarUnavailable:
+            await message.answer(
+                "Google Calendar временно недоступен. Черновик сохранён — попробуйте вернуться к проверке ещё раз.",
+                reply_markup=_keyboard(
+                    [
+                        [InlineKeyboardButton(text="🔄 Проверить ещё раз", callback_data="b:manual:edit:review")],
+                        [InlineKeyboardButton(text="✏️ Изменить", callback_data="b:manual:edit")],
+                        [InlineKeyboardButton(text="✖ Отменить", callback_data="abort")],
+                    ]
+                ),
+            )
+            return
+        if conflict:
+            note = "\n\n⚠️ Время пересекается с другой встречей. Создание возможно только после отдельного подтверждения."
+            rows = [[InlineKeyboardButton(text="⚠️ Создать с пересечением", callback_data="b:manual:create:1")]]
+        else:
+            note = "\n\nПересечений не найдено."
+            rows = [[InlineKeyboardButton(text="✅ Создать встречу", callback_data="b:manual:create:0")]]
+        rows.extend(
+            [
+                [InlineKeyboardButton(text="✏️ Изменить", callback_data="b:manual:edit")],
+                [InlineKeyboardButton(text="✖ Отменить", callback_data="abort")],
+            ]
+        )
+        await state.set_state(ReleaseBFlow.manual_review)
+        await message.answer(manual_summary(data) + note, reply_markup=_keyboard(rows))
+
     @router.callback_query(F.data == "b:manual")
     async def manual_start(callback: CallbackQuery, state: FSMContext) -> None:
         if not await require_admin(callback):
@@ -815,24 +872,209 @@ def create_release_b_router(
             return
         blocks_calendar = callback.data.rsplit(":", 1)[1] == "1"
         await state.update_data(blocks_calendar=blocks_calendar)
+        await callback.answer("Проверяю календарь…")
+        if callback.message:
+            await render_manual_review(callback.message, state)
+
+    @router.callback_query(F.data == "b:manual:edit")
+    async def manual_edit_menu(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await require_admin(callback):
+            return
         data = await state.get_data()
-        start = datetime.fromisoformat(str(data["start_at"]))
-        end = start + timedelta(minutes=int(data["duration"]))
-        try:
-            conflict = await manual_conflict(start, end)
-        except CalendarUnavailable:
-            await callback.answer("Google Calendar временно недоступен", show_alert=True)
+        required = {"subject", "day", "start_at", "duration", "blocks_calendar"}
+        if not required.issubset(data):
+            await callback.answer("Черновик устарел. Начните создание встречи заново.", show_alert=True)
             return
         await callback.answer()
         if callback.message:
-            if conflict:
-                note = "\n\n⚠️ Время пересекается с другой встречей. Создание возможно только после отдельного подтверждения."
-                rows = [[InlineKeyboardButton(text="⚠️ Создать с пересечением", callback_data="b:manual:create:1")]]
+            await callback.message.answer(
+                "Что изменить в черновике встречи?",
+                reply_markup=_keyboard(
+                    [
+                        [InlineKeyboardButton(text="📝 Тема", callback_data="b:manual:edit:value:subject")],
+                        [
+                            InlineKeyboardButton(text="📅 Дата", callback_data="b:manual:edit:date"),
+                            InlineKeyboardButton(text="🕐 Время", callback_data="b:manual:edit:value:time"),
+                        ],
+                        [InlineKeyboardButton(text="⏱ Длительность", callback_data="b:manual:edit:duration")],
+                        [InlineKeyboardButton(text="✉️ Участник", callback_data="b:manual:edit:email")],
+                        [
+                            InlineKeyboardButton(text="📄 Описание", callback_data="b:manual:edit:value:description"),
+                            InlineKeyboardButton(text="📍 Место", callback_data="b:manual:edit:value:location"),
+                        ],
+                        [InlineKeyboardButton(text="🔒 Занято/свободно", callback_data="b:manual:edit:block")],
+                        [InlineKeyboardButton(text="← К проверке", callback_data="b:manual:edit:review")],
+                    ]
+                ),
+            )
+
+    @router.callback_query(F.data == "b:manual:edit:review")
+    async def manual_edit_review(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await require_admin(callback):
+            return
+        await callback.answer("Проверяю календарь…")
+        if callback.message:
+            await render_manual_review(callback.message, state)
+
+    @router.callback_query(F.data == "b:manual:edit:date")
+    async def manual_edit_date(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await require_admin(callback):
+            return
+        today = datetime.now(zone)
+        await state.set_state(ReleaseBFlow.manual_edit_date)
+        await callback.answer()
+        if callback.message:
+            await show_date_picker(
+                callback.message,
+                "bdate:manualedit",
+                "Выберите новую дату встречи:",
+                today,
+                today + timedelta(days=366),
+            )
+
+    @router.callback_query(F.data.startswith("b:manual:edit:value:"))
+    async def manual_edit_value_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await require_admin(callback):
+            return
+        field = callback.data.rsplit(":", 1)[1]
+        prompts = {
+            "subject": "Введите новую тему:",
+            "time": "Введите новое время, например 930 или 1430 (МСК):",
+            "email": "Введите новый email участника:",
+            "description": "Введите новое описание или дефис «-», чтобы очистить:",
+            "location": "Введите новое место/ссылку или дефис «-», чтобы очистить:",
+        }
+        if field not in prompts:
+            await callback.answer("Поле недоступно", show_alert=True)
+            return
+        await state.update_data(manual_edit_field=field)
+        await state.set_state(ReleaseBFlow.manual_edit_value)
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(prompts[field], reply_markup=cancel_keyboard())
+
+    @router.message(ReleaseBFlow.manual_edit_value)
+    async def manual_edit_value(message: Message, state: FSMContext) -> None:
+        if message.from_user is None or not is_admin(message.from_user.id):
+            await state.clear()
+            return
+        data = await state.get_data()
+        field = str(data.get("manual_edit_field") or "")
+        raw = (message.text or "").strip()
+        try:
+            if field == "subject":
+                if not 1 <= len(raw) <= 200:
+                    raise ValueError
+                updates: dict[str, object] = {"subject": raw}
+            elif field == "time":
+                start = parse_start(str(data["day"]), raw)
+                if start <= datetime.now(zone):
+                    raise ValueError
+                updates = {"start_at": start.isoformat()}
+            elif field == "email":
+                email = raw.lower()
+                if len(email) > 254 or not EMAIL_RE.fullmatch(email):
+                    raise ValueError
+                updates = {"email": email}
+            elif field == "description":
+                if len(raw) > 2000:
+                    raise ValueError
+                updates = {"description": None if raw == "-" else raw or None}
+            elif field == "location":
+                if len(raw) > 500:
+                    raise ValueError
+                updates = {"location": None if raw == "-" else raw or None}
             else:
-                note = "\n\nПересечений не найдено."
-                rows = [[InlineKeyboardButton(text="✅ Создать встречу", callback_data="b:manual:create:0")]]
-            rows.append([InlineKeyboardButton(text="✖ Отменить", callback_data="abort")])
-            await callback.message.answer(manual_summary(data) + note, reply_markup=_keyboard(rows))
+                raise ValueError
+        except (KeyError, TypeError, ValueError):
+            await message.answer("Значение не подходит. Проверьте формат и длину.", reply_markup=cancel_keyboard())
+            return
+        await state.update_data(**updates)
+        await state.set_state(ReleaseBFlow.manual_review)
+        await render_manual_review(message, state)
+
+    @router.callback_query(F.data == "b:manual:edit:duration")
+    async def manual_edit_duration(callback: CallbackQuery) -> None:
+        if not await require_admin(callback):
+            return
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(
+                "Выберите новую длительность:",
+                reply_markup=_keyboard(
+                    [
+                        [InlineKeyboardButton(text=f"{item} мин", callback_data=f"b:manual:edit:setduration:{item}")]
+                        for item in load_rules(db, settings).durations
+                    ]
+                ),
+            )
+
+    @router.callback_query(F.data.startswith("b:manual:edit:setduration:"))
+    async def manual_edit_set_duration(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await require_admin(callback):
+            return
+        try:
+            duration = int(callback.data.rsplit(":", 1)[1])
+        except ValueError:
+            await callback.answer("Длительность недоступна", show_alert=True)
+            return
+        if duration not in load_rules(db, settings).durations:
+            await callback.answer("Длительность недоступна", show_alert=True)
+            return
+        await state.update_data(duration=duration)
+        await callback.answer("Проверяю календарь…")
+        if callback.message:
+            await render_manual_review(callback.message, state)
+
+    @router.callback_query(F.data == "b:manual:edit:email")
+    async def manual_edit_email(callback: CallbackQuery) -> None:
+        if not await require_admin(callback):
+            return
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(
+                "Изменить участника:",
+                reply_markup=_keyboard(
+                    [
+                        [InlineKeyboardButton(text="👤 Только я", callback_data="b:manual:edit:setemail:self")],
+                        [InlineKeyboardButton(text="✉️ Ввести email", callback_data="b:manual:edit:value:email")],
+                    ]
+                ),
+            )
+
+    @router.callback_query(F.data == "b:manual:edit:setemail:self")
+    async def manual_edit_email_self(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await require_admin(callback):
+            return
+        await state.update_data(email=None)
+        await callback.answer("Проверяю календарь…")
+        if callback.message:
+            await render_manual_review(callback.message, state)
+
+    @router.callback_query(F.data == "b:manual:edit:block")
+    async def manual_edit_block(callback: CallbackQuery) -> None:
+        if not await require_admin(callback):
+            return
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(
+                "Должна встреча блокировать время?",
+                reply_markup=_keyboard(
+                    [
+                        [InlineKeyboardButton(text="🔒 Да", callback_data="b:manual:edit:setblock:1")],
+                        [InlineKeyboardButton(text="🟢 Нет", callback_data="b:manual:edit:setblock:0")],
+                    ]
+                ),
+            )
+
+    @router.callback_query(F.data.startswith("b:manual:edit:setblock:"))
+    async def manual_edit_set_block(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await require_admin(callback):
+            return
+        await state.update_data(blocks_calendar=callback.data.endswith(":1"))
+        await callback.answer("Проверяю календарь…")
+        if callback.message:
+            await render_manual_review(callback.message, state)
 
     @router.callback_query(F.data.startswith("b:manual:create:"))
     async def manual_create(callback: CallbackQuery, state: FSMContext) -> None:

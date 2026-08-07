@@ -81,6 +81,11 @@ class ReleaseBBotTests(unittest.TestCase):
             self.assertTrue(asyncio.run(matches("move_start", "b:move:42")))
             self.assertFalse(asyncio.run(matches("move_start", "b:move:dur:42:30")))
             self.assertTrue(asyncio.run(matches("move_duration", "b:move:dur:42:30")))
+            self.assertTrue(asyncio.run(matches("manual_edit_menu", "b:manual:edit")))
+            self.assertFalse(asyncio.run(matches("manual_edit_menu", "b:manual:edit:review")))
+            self.assertTrue(asyncio.run(matches("manual_edit_review", "b:manual:edit:review")))
+            self.assertTrue(asyncio.run(matches("manual_edit_value_prompt", "b:manual:edit:value:time")))
+            self.assertFalse(asyncio.run(matches("manual_edit_value_prompt", "b:manual:edit:setduration:30")))
 
 
 if __name__ == "__main__":

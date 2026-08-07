@@ -68,6 +68,9 @@ class ReleaseCFlow(StatesGroup):
     occurrence_date = State()
     occurrence_time = State()
     series_new_time = State()
+    series_edit_date = State()
+    series_edit_until = State()
+    series_edit_value = State()
     notification_value = State()
 
 
@@ -244,6 +247,52 @@ def create_release_c_router(
             ),
         )
 
+    async def render_series_review(message: Message, state: FSMContext) -> None:
+        data = await state.get_data()
+        try:
+            start = datetime.combine(
+                date.fromisoformat(str(data["start_date"])),
+                _clock(str(data["start_time"])),
+                zone,
+            )
+            end = start + timedelta(minutes=int(data["duration"]))
+            occurrences = generate_occurrences(
+                start,
+                end,
+                str(data["frequency"]),
+                date.fromisoformat(str(data["until_date"])),
+            )
+        except (KeyError, TypeError, ValueError):
+            await state.clear()
+            await message.answer("Черновик повреждён. Начните создание заново.", reply_markup=home_keyboard())
+            return
+        guest = html.escape(str(data["email"])) if data.get("email") else "только я"
+        lines = [
+            "<b>Проверьте серию</b>",
+            "",
+            f"Тема: {html.escape(str(data['subject']))}",
+            f"Первая встреча: {start:%d.%m.%Y %H:%M}–{end:%H:%M} (МСК)",
+            f"Повтор: {FREQUENCY_LABELS[str(data['frequency'])]} до {data['until_date']}",
+            f"Количество встреч: {len(occurrences)}",
+            f"Участник: {guest}",
+            f"Календарь: {'занято' if data.get('blocks_calendar') else 'свободно'}",
+        ]
+        if data.get("description"):
+            lines.append(f"Описание: {html.escape(str(data['description']))}")
+        if data.get("location"):
+            lines.append(f"Место/ссылка: {html.escape(str(data['location']))}")
+        await state.set_state(None)
+        await message.answer(
+            "\n".join(lines),
+            reply_markup=_keyboard(
+                [
+                    [InlineKeyboardButton(text="✅ Создать серию", callback_data="c:series:create")],
+                    [InlineKeyboardButton(text="✏️ Изменить", callback_data="c:series:edit")],
+                    [InlineKeyboardButton(text="✖ Отменить", callback_data="abort")],
+                ]
+            ),
+        )
+
     @router.callback_query(F.data == "c:series")
     async def series_menu(callback: CallbackQuery, state: FSMContext) -> None:
         if not await require_admin(callback):
@@ -278,13 +327,15 @@ def create_release_c_router(
                 "start": ReleaseCFlow.series_date.state,
                 "until": ReleaseCFlow.series_until.state,
                 "occurrence": ReleaseCFlow.occurrence_date.state,
+                "editstart": ReleaseCFlow.series_edit_date.state,
+                "edituntil": ReleaseCFlow.series_edit_until.state,
             }
             if kind not in expected_states or await state.get_state() != expected_states[kind]:
                 raise ValueError
             today = datetime.now(zone).date()
-            if kind == "start":
+            if kind in {"start", "editstart"}:
                 minimum, maximum = today, today + timedelta(days=366)
-            elif kind == "until":
+            elif kind in {"until", "edituntil"}:
                 minimum = date.fromisoformat(str(data["start_date"]))
                 maximum = minimum + timedelta(days=366)
             elif kind == "occurrence":
@@ -325,7 +376,7 @@ def create_release_c_router(
             await state.set_state(None)
             if callback.message:
                 await ask_series_participant(callback.message)
-        else:
+        elif kind == "occurrence":
             await state.update_data(move_date=selected.isoformat())
             await state.set_state(ReleaseCFlow.occurrence_time)
             if callback.message:
@@ -333,6 +384,19 @@ def create_release_c_router(
                     "Введите новое время, например 930 или 1430 (МСК):",
                     reply_markup=cancel_keyboard(),
                 )
+        elif kind == "editstart":
+            updates: dict[str, object] = {"start_date": selected.isoformat()}
+            if date.fromisoformat(str(data["until_date"])) < selected:
+                updates["until_date"] = selected.isoformat()
+            await state.update_data(**updates)
+            await state.set_state(None)
+            if callback.message:
+                await render_series_review(callback.message, state)
+        else:
+            await state.update_data(until_date=selected.isoformat())
+            await state.set_state(None)
+            if callback.message:
+                await render_series_review(callback.message, state)
 
     @router.message(ReleaseCFlow.series_subject)
     async def series_subject(message: Message, state: FSMContext) -> None:
@@ -512,28 +576,255 @@ def create_release_c_router(
             return
         blocks = callback.data.rsplit(":", 1)[1] == "1"
         await state.update_data(blocks_calendar=blocks)
+        await callback.answer()
+        if callback.message:
+            await render_series_review(callback.message, state)
+
+    @router.callback_query(F.data == "c:series:edit")
+    async def series_edit_menu(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await require_admin(callback):
+            return
         data = await state.get_data()
-        start = datetime.combine(date.fromisoformat(str(data["start_date"])), _clock(str(data["start_time"])), zone)
-        end = start + timedelta(minutes=int(data["duration"]))
-        occurrences = generate_occurrences(start, end, str(data["frequency"]), date.fromisoformat(str(data["until_date"])))
-        guest = html.escape(str(data["email"])) if data.get("email") else "только я"
+        required = {"subject", "start_date", "start_time", "duration", "frequency", "until_date", "blocks_calendar"}
+        if not required.issubset(data) or data.get("series_draft_id"):
+            await callback.answer(
+                "Черновик уже отправлялся или устарел. Начните создание серии заново.",
+                show_alert=True,
+            )
+            return
         await callback.answer()
         if callback.message:
             await callback.message.answer(
-                "<b>Проверьте серию</b>\n\n"
-                f"Тема: {html.escape(str(data['subject']))}\n"
-                f"Первая встреча: {start:%d.%m.%Y %H:%M}–{end:%H:%M} (МСК)\n"
-                f"Повтор: {FREQUENCY_LABELS[str(data['frequency'])]} до {data['until_date']}\n"
-                f"Количество встреч: {len(occurrences)}\n"
-                f"Участник: {guest}\n"
-                f"Календарь: {'занято' if blocks else 'свободно'}",
+                "Что изменить в черновике серии?",
                 reply_markup=_keyboard(
                     [
-                        [InlineKeyboardButton(text="✅ Создать серию", callback_data="c:series:create")],
-                        [InlineKeyboardButton(text="✖ Отменить", callback_data="abort")],
+                        [InlineKeyboardButton(text="📝 Тема", callback_data="c:series:edit:value:subject")],
+                        [
+                            InlineKeyboardButton(text="📅 Дата начала", callback_data="c:series:edit:date"),
+                            InlineKeyboardButton(text="🕐 Время", callback_data="c:series:edit:value:time"),
+                        ],
+                        [
+                            InlineKeyboardButton(text="⏱ Длительность", callback_data="c:series:edit:duration"),
+                            InlineKeyboardButton(text="🔁 Повтор", callback_data="c:series:edit:frequency"),
+                        ],
+                        [InlineKeyboardButton(text="🏁 Последняя дата", callback_data="c:series:edit:until")],
+                        [InlineKeyboardButton(text="✉️ Участник", callback_data="c:series:edit:email")],
+                        [
+                            InlineKeyboardButton(text="📄 Описание", callback_data="c:series:edit:value:description"),
+                            InlineKeyboardButton(text="📍 Место", callback_data="c:series:edit:value:location"),
+                        ],
+                        [InlineKeyboardButton(text="🔒 Занято/свободно", callback_data="c:series:edit:block")],
+                        [InlineKeyboardButton(text="← К проверке", callback_data="c:series:edit:review")],
                     ]
                 ),
             )
+
+    @router.callback_query(F.data == "c:series:edit:review")
+    async def series_edit_review(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await require_admin(callback):
+            return
+        await callback.answer()
+        if callback.message:
+            await render_series_review(callback.message, state)
+
+    @router.callback_query(F.data == "c:series:edit:date")
+    async def series_edit_date(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await require_admin(callback):
+            return
+        today = datetime.now(zone).date()
+        await state.set_state(ReleaseCFlow.series_edit_date)
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(
+                "Выберите новую дату первой встречи:",
+                reply_markup=calendar_keyboard("cdate:editstart", today, today, today + timedelta(days=366)),
+            )
+
+    @router.callback_query(F.data == "c:series:edit:until")
+    async def series_edit_until(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await require_admin(callback):
+            return
+        data = await state.get_data()
+        start_day = date.fromisoformat(str(data["start_date"]))
+        await state.set_state(ReleaseCFlow.series_edit_until)
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(
+                "Выберите новую последнюю дату серии:",
+                reply_markup=calendar_keyboard(
+                    "cdate:edituntil",
+                    start_day,
+                    start_day,
+                    start_day + timedelta(days=366),
+                ),
+            )
+
+    @router.callback_query(F.data.startswith("c:series:edit:value:"))
+    async def series_edit_value_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await require_admin(callback):
+            return
+        field = callback.data.rsplit(":", 1)[1]
+        prompts = {
+            "subject": "Введите новую тему:",
+            "time": "Введите новое время, например 930 или 1430 (МСК):",
+            "email": "Введите новый email участника:",
+            "description": "Введите новое описание или дефис «-», чтобы очистить:",
+            "location": "Введите новое место/ссылку или дефис «-», чтобы очистить:",
+        }
+        if field not in prompts:
+            await callback.answer("Поле недоступно", show_alert=True)
+            return
+        await state.update_data(series_edit_field=field)
+        await state.set_state(ReleaseCFlow.series_edit_value)
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(prompts[field], reply_markup=cancel_keyboard())
+
+    @router.message(ReleaseCFlow.series_edit_value)
+    async def series_edit_value(message: Message, state: FSMContext) -> None:
+        if message.from_user is None or not is_admin(message.from_user.id):
+            await state.clear()
+            return
+        data = await state.get_data()
+        field = str(data.get("series_edit_field") or "")
+        raw = (message.text or "").strip()
+        try:
+            if field == "subject":
+                if not 1 <= len(raw) <= 200:
+                    raise ValueError
+                value: object = raw
+            elif field == "time":
+                value = _clock(raw).isoformat(timespec="minutes")
+            elif field == "email":
+                value = raw.lower()
+                if len(str(value)) > 254 or not EMAIL_RE.fullmatch(str(value)):
+                    raise ValueError
+            elif field == "description":
+                if len(raw) > 2000:
+                    raise ValueError
+                value = None if raw == "-" else raw
+            elif field == "location":
+                if len(raw) > 500:
+                    raise ValueError
+                value = None if raw == "-" else raw
+            else:
+                raise ValueError
+        except ValueError:
+            await message.answer("Значение не подходит. Проверьте формат и длину.", reply_markup=cancel_keyboard())
+            return
+        target = "start_time" if field == "time" else field
+        await state.update_data(**{target: value})
+        await state.set_state(None)
+        await render_series_review(message, state)
+
+    @router.callback_query(F.data == "c:series:edit:duration")
+    async def series_edit_duration(callback: CallbackQuery) -> None:
+        if not await require_admin(callback):
+            return
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(
+                "Выберите новую длительность:",
+                reply_markup=_keyboard(
+                    [
+                        [InlineKeyboardButton(text=f"{item} мин.", callback_data=f"c:series:edit:setduration:{item}")]
+                        for item in load_rules(db, settings).durations
+                    ]
+                ),
+            )
+
+    @router.callback_query(F.data.startswith("c:series:edit:setduration:"))
+    async def series_edit_set_duration(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await require_admin(callback):
+            return
+        duration = int(callback.data.rsplit(":", 1)[1])
+        if duration not in load_rules(db, settings).durations:
+            await callback.answer("Длительность недоступна", show_alert=True)
+            return
+        await state.update_data(duration=duration)
+        await callback.answer()
+        if callback.message:
+            await render_series_review(callback.message, state)
+
+    @router.callback_query(F.data == "c:series:edit:frequency")
+    async def series_edit_frequency(callback: CallbackQuery) -> None:
+        if not await require_admin(callback):
+            return
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(
+                "Выберите новый повтор:",
+                reply_markup=_keyboard(
+                    [
+                        [InlineKeyboardButton(text="Ежедневно", callback_data=f"c:series:edit:setfrequency:{SERIES_DAILY}")],
+                        [InlineKeyboardButton(text="Еженедельно", callback_data=f"c:series:edit:setfrequency:{SERIES_WEEKLY}")],
+                        [InlineKeyboardButton(text="Ежемесячно", callback_data=f"c:series:edit:setfrequency:{SERIES_MONTHLY}")],
+                    ]
+                ),
+            )
+
+    @router.callback_query(F.data.startswith("c:series:edit:setfrequency:"))
+    async def series_edit_set_frequency(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await require_admin(callback):
+            return
+        frequency = callback.data.rsplit(":", 1)[1]
+        if frequency not in FREQUENCY_LABELS:
+            await callback.answer("Повтор недоступен", show_alert=True)
+            return
+        await state.update_data(frequency=frequency)
+        await callback.answer()
+        if callback.message:
+            await render_series_review(callback.message, state)
+
+    @router.callback_query(F.data == "c:series:edit:email")
+    async def series_edit_email(callback: CallbackQuery) -> None:
+        if not await require_admin(callback):
+            return
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(
+                "Изменить участника:",
+                reply_markup=_keyboard(
+                    [
+                        [InlineKeyboardButton(text="👤 Только я", callback_data="c:series:edit:setemail:self")],
+                        [InlineKeyboardButton(text="✉️ Ввести email", callback_data="c:series:edit:value:email")],
+                    ]
+                ),
+            )
+
+    @router.callback_query(F.data == "c:series:edit:setemail:self")
+    async def series_edit_email_self(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await require_admin(callback):
+            return
+        await state.update_data(email=None)
+        await callback.answer()
+        if callback.message:
+            await render_series_review(callback.message, state)
+
+    @router.callback_query(F.data == "c:series:edit:block")
+    async def series_edit_block(callback: CallbackQuery) -> None:
+        if not await require_admin(callback):
+            return
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(
+                "Должна серия занимать время?",
+                reply_markup=_keyboard(
+                    [
+                        [InlineKeyboardButton(text="🔒 Да", callback_data="c:series:edit:setblock:1")],
+                        [InlineKeyboardButton(text="🟢 Нет", callback_data="c:series:edit:setblock:0")],
+                    ]
+                ),
+            )
+
+    @router.callback_query(F.data.startswith("c:series:edit:setblock:"))
+    async def series_edit_set_block(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await require_admin(callback):
+            return
+        await state.update_data(blocks_calendar=callback.data.endswith(":1"))
+        await callback.answer()
+        if callback.message:
+            await render_series_review(callback.message, state)
 
     async def create_series_from_state(callback: CallbackQuery, state: FSMContext, allow_overlap: bool) -> None:
         await callback.answer("Проверяю календарь…")

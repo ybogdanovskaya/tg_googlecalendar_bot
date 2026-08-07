@@ -100,6 +100,11 @@ class ReleaseCBotTests(unittest.TestCase):
             self.assertTrue(asyncio.run(matches("series_time_start", "c:series:time:8")))
             self.assertFalse(asyncio.run(matches("series_time_start", "c:series:time:apply")))
             self.assertTrue(asyncio.run(matches("series_time_apply", "c:series:time:apply")))
+            self.assertTrue(asyncio.run(matches("series_edit_menu", "c:series:edit")))
+            self.assertFalse(asyncio.run(matches("series_edit_menu", "c:series:edit:review")))
+            self.assertTrue(asyncio.run(matches("series_edit_review", "c:series:edit:review")))
+            self.assertTrue(asyncio.run(matches("series_edit_value_prompt", "c:series:edit:value:time")))
+            self.assertFalse(asyncio.run(matches("series_edit_value_prompt", "c:series:edit:setduration:30")))
         finally:
             temporary.cleanup()
 
