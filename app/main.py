@@ -23,6 +23,17 @@ async def run() -> None:
     configure_logging(settings.log_path)
     database = Database(settings.database_path)
     database.initialize()
+    schema_version, release_id = database.schema_info()
+    LOGGER.info(
+        "database_ready",
+        extra={
+            "schema_version": schema_version,
+            "release_id": release_id,
+            "migration_backup_created": bool(
+                database.last_migration_result and database.last_migration_result.backup_path
+            ),
+        },
+    )
     if settings.apps_script_url:
         calendar = AppsScriptCalendar(settings.apps_script_url, settings.apps_script_secret_file)
     else:
