@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from logging.handlers import TimedRotatingFileHandler
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -27,7 +28,15 @@ class JsonFormatter(logging.Formatter):
 def configure_logging(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     formatter = JsonFormatter()
-    file_handler = logging.FileHandler(path, encoding="utf-8")
+    file_handler = TimedRotatingFileHandler(
+        path,
+        when="midnight",
+        interval=1,
+        backupCount=90,
+        encoding="utf-8",
+        utc=True,
+        delay=True,
+    )
     file_handler.setFormatter(formatter)
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)

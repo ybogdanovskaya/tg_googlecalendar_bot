@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 LOGGER = logging.getLogger(__name__)
-RELEASE_ID = "release-c"
+RELEASE_ID = "release-d"
 
 
 @dataclass(frozen=True)
@@ -281,6 +281,36 @@ MIGRATIONS = (
                 error_count INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL
             )
+            """,
+        ),
+    ),
+    Migration(
+        5,
+        "release_d_privacy",
+        (
+            """
+            CREATE TABLE IF NOT EXISTS deletion_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER,
+                mode TEXT NOT NULL,
+                status TEXT NOT NULL,
+                scope_before TEXT NOT NULL,
+                execute_after TEXT,
+                future_meeting_count INTEGER NOT NULL DEFAULT 0,
+                last_error_code TEXT,
+                created_at TEXT NOT NULL,
+                confirmed_at TEXT,
+                completed_at TEXT
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_deletion_due
+            ON deletion_requests(status, execute_after)
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_deletion_one_open
+            ON deletion_requests(telegram_id)
+            WHERE status IN ('REQUESTED', 'PROCESSING', 'WAITING')
             """,
         ),
     ),

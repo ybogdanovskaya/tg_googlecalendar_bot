@@ -16,8 +16,10 @@ from app.bot import create_router
 from app.config import Settings
 from app.db import Database
 from app.logging_setup import configure_logging
+from app.rate_limit import UserRateLimitMiddleware
 from app.release_b_handlers import create_release_b_router
 from app.release_c_handlers import create_release_c_router
+from app.release_d_handlers import create_release_d_router
 
 
 LOGGER = logging.getLogger(__name__)
@@ -66,6 +68,10 @@ async def run() -> None:
         calendar = GoogleCalendar(settings.google_token_file, settings.google_calendar_id)
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dispatcher = Dispatcher(events_isolation=SimpleEventIsolation())
+    limiter = UserRateLimitMiddleware(settings.admin_telegram_id)
+    dispatcher.message.outer_middleware(limiter)
+    dispatcher.callback_query.outer_middleware(limiter)
+    dispatcher.include_router(create_release_d_router(settings, database, calendar))
     dispatcher.include_router(create_release_c_router(settings, database, calendar, automation))
     dispatcher.include_router(create_release_b_router(settings, database, calendar, automation))
     dispatcher.include_router(create_router(settings, database, calendar, automation))

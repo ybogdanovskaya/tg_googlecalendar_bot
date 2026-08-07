@@ -114,6 +114,12 @@ def main_menu(is_admin: bool) -> InlineKeyboardMarkup:
     return _keyboard(rows)
 
 
+def privacy_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text="🗑 Управление моими данными", callback_data="d:data")]]
+    rows.extend(main_menu(is_admin).inline_keyboard)
+    return _keyboard(rows)
+
+
 def format_request(
     request: MeetingRequest,
     timezone_name: str,
@@ -165,8 +171,8 @@ def privacy_text(settings: Settings) -> str:
         "Пользователю показываются только свободные интервалы — содержимое календаря, названия "
         "и участники других событий не раскрываются. Данные размещены на сервере в России. "
         "Рабочие токены и пароли не хранятся в базе заявок и не выводятся в логах.\n\n"
-        "До запуска автоматического срока хранения данные удаляются владельцем вручную по запросу. "
-        "Запрос можно отправить сообщением владельцу бота.\n\n"
+        "Персональные данные и история хранятся не более 12 месяцев, после чего автоматически "
+        "обезличиваются. Запросить удаление раньше можно по кнопке «Управление моими данными».\n\n"
         f"Версия политики: {html.escape(settings.privacy_policy_version)}."
     )
 
@@ -487,6 +493,7 @@ def create_router(
                     ],
                     [InlineKeyboardButton(text="🚫 Закрытые даты", callback_data="aset:closed")],
                     [InlineKeyboardButton(text="🔔 Напоминания", callback_data="c:notify")],
+                    [InlineKeyboardButton(text="📊 Статистика", callback_data="d:stats")],
                     [InlineKeyboardButton(text="🧾 История изменений", callback_data="aset:history")],
                     [InlineKeyboardButton(text="↩️ Вернуть значения по умолчанию", callback_data="aset:reset:ask")],
                     [InlineKeyboardButton(text="← Главное меню", callback_data="home")],
@@ -575,11 +582,11 @@ def create_router(
             return
         await callback.answer()
         if callback.message:
-            await callback.message.answer(privacy_text(settings), reply_markup=main_menu(is_admin(callback.from_user.id)))
+            await callback.message.answer(privacy_text(settings), reply_markup=privacy_keyboard(is_admin(callback.from_user.id)))
 
     @router.message(Command("privacy"))
     async def privacy_command(message: Message) -> None:
-        await message.answer(privacy_text(settings), reply_markup=main_menu(bool(message.from_user and is_admin(message.from_user.id))))
+        await message.answer(privacy_text(settings), reply_markup=privacy_keyboard(bool(message.from_user and is_admin(message.from_user.id))))
 
     @router.callback_query(F.data == "book")
     async def begin_booking(callback: CallbackQuery, state: FSMContext) -> None:

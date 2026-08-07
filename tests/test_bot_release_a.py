@@ -80,6 +80,15 @@ class ReleaseABotTests(unittest.TestCase):
         self.assertNotIn("admin:settings", user_callbacks)
         self.assertIn("privacy", user_callbacks)
 
+    def test_existing_main_menu_navigation_is_unchanged(self) -> None:
+        user_callbacks = [button.callback_data for row in main_menu(False).inline_keyboard for button in row]
+        admin_callbacks = [button.callback_data for row in main_menu(True).inline_keyboard for button in row]
+        self.assertEqual(user_callbacks, ["book", "my", "help", "privacy"])
+        self.assertEqual(
+            admin_callbacks,
+            ["book", "my", "help", "privacy", "admin:list", "b:changes", "b:manual", "c:series", "admin:settings"],
+        )
+
     def test_navigation_without_manual_start_command_is_available(self) -> None:
         self.assertEqual(home_keyboard().inline_keyboard[0][0].callback_data, "home")
         self.assertEqual(cancel_keyboard().inline_keyboard[0][0].callback_data, "abort")
@@ -94,9 +103,10 @@ class ReleaseABotTests(unittest.TestCase):
         self.assertGreater(len(router.callback_query.handlers), 20)
         self.assertGreater(len(router.message.handlers), 5)
 
-    def test_privacy_text_does_not_claim_unimplemented_automatic_deletion(self) -> None:
+    def test_privacy_text_describes_release_d_retention(self) -> None:
         text = privacy_text(self.settings())
-        self.assertIn("До запуска автоматического срока хранения", text)
+        self.assertIn("не более 12 месяцев", text)
+        self.assertIn("Управление моими данными", text)
         self.assertIn("сервере в России", text)
 
 
