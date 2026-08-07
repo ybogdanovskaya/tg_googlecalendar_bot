@@ -141,9 +141,10 @@ def format_request(
         lines.extend(
             [
                 f"Участник: {html.escape(request.telegram_name)}",
-                f"Email: {html.escape(request.email)}",
             ]
         )
+        if request.email:
+            lines.append(f"Email: {html.escape(request.email)}")
         if request.description:
             lines.append(f"Описание: {html.escape(request.description)}")
         if request.location:

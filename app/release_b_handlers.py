@@ -461,8 +461,8 @@ def create_release_b_router(settings: Settings, db: Database, calendar: Calendar
             if request is None or not request.google_event_id:
                 raise CalendarUnavailable("event id missing")
             if change.change_type == CHANGE_CANCEL:
-                if not await calendar.delete_event(request.google_event_id):
-                    raise CalendarUnavailable("event not found")
+                # Отсутствующее событие уже соответствует цели отмены; операция идемпотентна.
+                await calendar.delete_event(request.google_event_id)
             else:
                 moved = replace(request, start_at=change.proposed_start_at, end_at=change.proposed_end_at)
                 await calendar.update_event(moved)

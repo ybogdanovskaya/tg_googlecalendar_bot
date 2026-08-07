@@ -643,8 +643,11 @@ class Database:
         try:
             connection.execute("BEGIN IMMEDIATE")
             owned = connection.execute(
-                "SELECT id FROM meeting_requests WHERE id = ? AND telegram_id = ? AND status = ?",
-                (request_id, telegram_id, APPROVED),
+                """
+                SELECT id FROM meeting_requests
+                WHERE id = ? AND telegram_id = ? AND status = ? AND end_at > ?
+                """,
+                (request_id, telegram_id, APPROVED, now),
             ).fetchone()
             if owned is None:
                 raise RequestNotEditableError("approved meeting not found")
