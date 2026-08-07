@@ -8,6 +8,7 @@ User=calendarbot
 Group=calendarbot
 WorkingDirectory=/opt/calendar-bot
 EnvironmentFile=/etc/calendar-bot/calendar-bot.env
+Environment=PYTHONPATH=/opt/calendar-bot
 ExecStart=/opt/calendar-bot/.venv/bin/python scripts/healthcheck.py --database /var/lib/calendar-bot/calendar_bot.sqlite3 --token ${BOT_TOKEN_FILE} --backup-dir /var/lib/calendar-bot/backups --max-backup-age-hours 48 --min-free-bytes 2000000000 --apps-script-url-file ${APPS_SCRIPT_URL_FILE} --apps-script-secret-file ${APPS_SCRIPT_SECRET_FILE} --alert-token-file ${BOT_TOKEN_FILE} --admin-id ${ADMIN_TELEGRAM_ID}
 NoNewPrivileges=true
 PrivateTmp=true

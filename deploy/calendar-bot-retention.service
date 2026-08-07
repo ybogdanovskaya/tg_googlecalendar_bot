@@ -7,6 +7,7 @@ Type=oneshot
 User=calendarbot
 Group=calendarbot
 WorkingDirectory=/opt/calendar-bot
+Environment=PYTHONPATH=/opt/calendar-bot
 ExecStart=/opt/calendar-bot/.venv/bin/python scripts/retention.py --database /var/lib/calendar-bot/calendar_bot.sqlite3 --days 365
 NoNewPrivileges=true
 PrivateTmp=true
