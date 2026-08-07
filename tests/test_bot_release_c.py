@@ -97,6 +97,9 @@ class ReleaseCBotTests(unittest.TestCase):
             self.assertTrue(asyncio.run(matches("series_cancel_confirm", "c:series:cancel:confirm:8")))
             self.assertTrue(asyncio.run(matches("occurrence_move", "c:occ:move:5")))
             self.assertFalse(asyncio.run(matches("occurrence_move", "c:occ:move:apply:1")))
+            self.assertTrue(asyncio.run(matches("series_time_start", "c:series:time:8")))
+            self.assertFalse(asyncio.run(matches("series_time_start", "c:series:time:apply")))
+            self.assertTrue(asyncio.run(matches("series_time_apply", "c:series:time:apply")))
         finally:
             temporary.cleanup()
 

@@ -448,6 +448,9 @@ def create_release_c_router(
             await callback.answer("Черновик устарел. Начните создание заново.", show_alert=True)
             await state.clear()
             return
+        if start <= datetime.now(zone):
+            await callback.answer("Первая встреча уже в прошлом. Начните создание заново.", show_alert=True)
+            return
         try:
             conflict = bool(data.get("blocks_calendar")) and await has_conflict(occurrences)
         except CalendarUnavailable:
@@ -665,6 +668,9 @@ def create_release_c_router(
             return
         start = datetime.combine(date.fromisoformat(str(data["move_date"])), value, zone)
         end = start + (occurrence.actual_end_at - occurrence.actual_start_at)
+        if start <= datetime.now(zone):
+            await message.answer("Новое время должно быть в будущем.")
+            return
         await state.update_data(move_start=start.isoformat(), move_end=end.isoformat())
         try:
             conflict = await has_conflict([(start, end)], exclude_occurrence_id=occurrence.id)
@@ -789,7 +795,7 @@ def create_release_c_router(
         if callback.message:
             await callback.message.answer("Серия и её будущие встречи отменены.", reply_markup=home_keyboard())
 
-    @router.callback_query(F.data.startswith("c:series:time:"))
+    @router.callback_query(F.data.startswith("c:series:time:") & (F.data != "c:series:time:apply"))
     async def series_time_start(callback: CallbackQuery, state: FSMContext) -> None:
         if not await require_admin(callback):
             return
