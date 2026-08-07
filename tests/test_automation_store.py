@@ -99,7 +99,8 @@ class AutomationStoreTests(unittest.TestCase):
 
     def test_google_occurrence_change_and_deletion_update_local_state(self) -> None:
         start = datetime.now(UTC) + timedelta(days=5)
-        series = self.create_series(start)
+        draft = self.store.create_series_draft(**self.series_values(start))
+        series = self.store.activate_series(draft.id, "series-id", 1)
         occurrence = self.store.list_occurrences(series.id)[0]
         moved_start = start + timedelta(hours=2)
         state = CalendarEventState(
