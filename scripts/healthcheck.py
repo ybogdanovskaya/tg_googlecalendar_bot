@@ -13,10 +13,11 @@ from pathlib import Path
 from app.apps_script_calendar import AppsScriptCalendar
 
 
-def verify_sqlite(path: Path) -> None:
+def verify_sqlite(path: Path, immutable: bool = False) -> None:
     if not path.exists():
         raise RuntimeError("database_missing")
-    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+    immutable_option = "&immutable=1" if immutable else ""
+    with sqlite3.connect(f"file:{path}?mode=ro{immutable_option}", uri=True) as connection:
         result = connection.execute("PRAGMA quick_check").fetchone()
     if not result or str(result[0]).lower() != "ok":
         raise RuntimeError("database_check_failed")
@@ -30,7 +31,7 @@ def newest_backup(directory: Path, max_age_hours: int) -> Path:
     modified = datetime.fromtimestamp(latest.stat().st_mtime, UTC)
     if modified < datetime.now(UTC) - timedelta(hours=max_age_hours):
         raise RuntimeError("backup_stale")
-    verify_sqlite(latest)
+    verify_sqlite(latest, immutable=True)
     return latest
 
 
