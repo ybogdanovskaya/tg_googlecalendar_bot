@@ -48,6 +48,10 @@ def restore_database(backup_path: Path, target_path: Path) -> Path | None:
         destination.close()
         source.close()
     verify_database(temporary_path)
+    # The bot must be stopped before restore. Old WAL/SHM sidecars belong to the
+    # replaced database and could otherwise replay changes made after backup.
+    Path(f"{target_path}-wal").unlink(missing_ok=True)
+    Path(f"{target_path}-shm").unlink(missing_ok=True)
     temporary_path.replace(target_path)
     verify_database(target_path)
     return safety_path
