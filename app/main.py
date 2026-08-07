@@ -17,6 +17,7 @@ from app.config import Settings
 from app.db import Database
 from app.logging_setup import configure_logging
 from app.release_b_handlers import create_release_b_router
+from app.release_c_handlers import create_release_c_router
 
 
 LOGGER = logging.getLogger(__name__)
@@ -65,6 +66,7 @@ async def run() -> None:
         calendar = GoogleCalendar(settings.google_token_file, settings.google_calendar_id)
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dispatcher = Dispatcher(events_isolation=SimpleEventIsolation())
+    dispatcher.include_router(create_release_c_router(settings, database, calendar, automation))
     dispatcher.include_router(create_release_b_router(settings, database, calendar, automation))
     dispatcher.include_router(create_router(settings, database, calendar, automation))
     await configure_bot_menu(bot)

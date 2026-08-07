@@ -129,6 +129,7 @@ class Database:
         range_end: datetime,
         exclude_request_id: int | None = None,
         exclude_occurrence_id: int | None = None,
+        exclude_series_id: int | None = None,
     ) -> list[tuple[datetime, datetime]]:
         now = _iso(datetime.now(UTC))
         with self._connect() as connection:
@@ -204,6 +205,7 @@ class Database:
                   AND s.status IN (?, ?) AND s.blocks_calendar = 1
                   AND o.status IN (?, ?)
                   AND (? IS NULL OR o.id <> ?)
+                  AND (? IS NULL OR o.series_id <> ?)
                 """,
                 (
                     _iso(range_end),
@@ -214,6 +216,8 @@ class Database:
                     OCCURRENCE_MOVED,
                     exclude_occurrence_id,
                     exclude_occurrence_id,
+                    exclude_series_id,
+                    exclude_series_id,
                 ),
             ).fetchall()
         return [

@@ -6,9 +6,13 @@ from typing import Iterable
 
 from app.db import Database, RequestNotEditableError, SlotConflictError, _dt, _iso
 from app.models import (
+    ALTERNATIVE_OFFERED,
     APPROVED,
     APPROVING,
     CANCELLED_BY_ADMIN,
+    CHANGE_APPROVING,
+    CHANGE_PENDING,
+    CHANGE_RESCHEDULE,
     JOB_CANCELLED,
     JOB_DONE,
     JOB_FAILED,
@@ -326,6 +330,56 @@ class AutomationStore:
         result = self.get_occurrence(occurrence_id)
         if result is None:
             raise RuntimeError("cancelled occurrence not found")
+        return result
+
+    def retime_series(
+        self,
+        series_id: int,
+        admin_id: int,
+        start_at: datetime,
+        end_at: datetime,
+        occurrences: list[tuple[datetime, datetime]],
+    ) -> EventSeries:
+        now = _iso(datetime.now(UTC))
+        connection = self.db._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            owned = connection.execute(
+                "SELECT id FROM event_series WHERE id = ? AND created_by = ? AND status = ?",
+                (series_id, admin_id, SERIES_ACTIVE),
+            ).fetchone()
+            rows = connection.execute(
+                "SELECT id, status FROM event_occurrences WHERE series_id = ? ORDER BY expected_start_at",
+                (series_id,),
+            ).fetchall()
+            if owned is None or len(rows) != len(occurrences):
+                raise RequestNotEditableError("series cannot be retimed")
+            if any(str(row["status"]) != OCCURRENCE_SCHEDULED for row in rows):
+                raise RequestNotEditableError("series has occurrence exceptions")
+            connection.execute(
+                "UPDATE event_series SET start_at = ?, end_at = ?, updated_at = ? WHERE id = ?",
+                (_iso(start_at), _iso(end_at), now, series_id),
+            )
+            for row, (item_start, item_end) in zip(rows, occurrences, strict=True):
+                connection.execute(
+                    """
+                    UPDATE event_occurrences
+                    SET expected_start_at = ?, expected_end_at = ?, actual_start_at = ?,
+                        actual_end_at = ?, updated_at = ? WHERE id = ?
+                    """,
+                    (_iso(item_start), _iso(item_end), _iso(item_start), _iso(item_end), now, int(row["id"])),
+                )
+            self._cancel_jobs_for_series(connection, series_id, now)
+            self.db._audit(connection, admin_id, "series_retimed", "event_series", str(series_id), {})
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        result = self.get_series(series_id)
+        if result is None:
+            raise RuntimeError("retimed series not found")
         return result
 
     def rebuild_request_reminders(
@@ -694,6 +748,24 @@ class AutomationStore:
             """,
             (_iso(end_at), _iso(start_at), APPROVED, PENDING, APPROVING, now),
         ).fetchone()
+        alternative = connection.execute(
+            """
+            SELECT 1 FROM request_alternatives AS a
+            JOIN meeting_requests AS r ON r.id = a.request_id
+            WHERE r.blocks_calendar = 1 AND a.status = ? AND a.hold_until > ?
+              AND a.start_at < ? AND a.end_at > ? LIMIT 1
+            """,
+            (ALTERNATIVE_OFFERED, now, _iso(end_at), _iso(start_at)),
+        ).fetchone()
+        change = connection.execute(
+            """
+            SELECT 1 FROM change_requests AS c
+            JOIN meeting_requests AS r ON r.id = c.request_id
+            WHERE r.blocks_calendar = 1 AND c.change_type = ? AND c.status IN (?, ?)
+              AND c.proposed_start_at < ? AND c.proposed_end_at > ? LIMIT 1
+            """,
+            (CHANGE_RESCHEDULE, CHANGE_PENDING, CHANGE_APPROVING, _iso(end_at), _iso(start_at)),
+        ).fetchone()
         occurrence = connection.execute(
             """
             SELECT 1 FROM event_occurrences AS o
@@ -703,7 +775,7 @@ class AutomationStore:
             """,
             (SERIES_ACTIVE, SERIES_CREATING, OCCURRENCE_SCHEDULED, OCCURRENCE_MOVED, _iso(end_at), _iso(start_at)),
         ).fetchone()
-        return bool(request or occurrence)
+        return bool(request or alternative or change or occurrence)
 
     def _insert_job(
         self,

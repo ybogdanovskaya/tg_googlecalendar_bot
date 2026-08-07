@@ -106,6 +106,7 @@ def main_menu(is_admin: bool) -> InlineKeyboardMarkup:
                     InlineKeyboardButton(text="🔄 Переносы и отмены", callback_data="b:changes"),
                     InlineKeyboardButton(text="➕ Создать встречу", callback_data="b:manual"),
                 ],
+                [InlineKeyboardButton(text="🔁 Повторяющиеся встречи", callback_data="c:series")],
                 [InlineKeyboardButton(text="⚙️ Настройки", callback_data="admin:settings")],
             ]
         )
@@ -484,6 +485,7 @@ def create_router(
                         InlineKeyboardButton(text="📏 Шаг слотов", callback_data="aset:steps"),
                     ],
                     [InlineKeyboardButton(text="🚫 Закрытые даты", callback_data="aset:closed")],
+                    [InlineKeyboardButton(text="🔔 Напоминания", callback_data="c:notify")],
                     [InlineKeyboardButton(text="🧾 История изменений", callback_data="aset:history")],
                     [InlineKeyboardButton(text="↩️ Вернуть значения по умолчанию", callback_data="aset:reset:ask")],
                     [InlineKeyboardButton(text="← Главное меню", callback_data="home")],
