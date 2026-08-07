@@ -38,3 +38,9 @@ class CalendarClient(Protocol):
     ) -> str: ...
 
     async def delete_occurrence(self, series_id: str, occurrence: EventOccurrence) -> bool: ...
+
+    async def occurrence_state(
+        self,
+        series_id: str,
+        occurrence: EventOccurrence,
+    ) -> CalendarEventState: ...

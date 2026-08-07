@@ -105,6 +105,7 @@ async def reconcile_once(
 ) -> dict[str, int]:
     run_id = await asyncio.to_thread(store.start_sync_run)
     checked = changed = missing = errors = 0
+    unavailable = False
     rules = load_notification_rules(store.db, settings)
     try:
         candidates = await asyncio.to_thread(store.list_sync_candidates, limit)
@@ -132,6 +133,7 @@ async def reconcile_once(
                         await bot.send_message(recipient, message)
             except CalendarUnavailable:
                 errors += 1
+                unavailable = True
                 LOGGER.warning("calendar_reconciliation_unavailable", extra={"request_id": request.id})
                 break
             except Exception as exc:
@@ -140,6 +142,53 @@ async def reconcile_once(
                     "calendar_reconciliation_item_failed",
                     extra={"request_id": request.id, "error_type": type(exc).__name__},
                 )
+        if not unavailable:
+            occurrence_candidates = await asyncio.to_thread(store.list_occurrence_sync_candidates, limit)
+            for occurrence, series in occurrence_candidates:
+                try:
+                    state = await calendar.occurrence_state(str(series.google_series_id), occurrence)
+                    updated, updated_series, was_changed = await asyncio.to_thread(
+                        store.apply_occurrence_state,
+                        occurrence.id,
+                        state,
+                    )
+                    checked += 1
+                    if was_changed:
+                        changed += 1
+                        if not state.exists:
+                            missing += 1
+                        await asyncio.to_thread(
+                            store.rebuild_occurrence_reminders,
+                            updated.id,
+                            settings.admin_telegram_id,
+                            rules.reminder_minutes,
+                        )
+                        start = updated.actual_start_at.astimezone(ZoneInfo(settings.timezone))
+                        if state.exists:
+                            message = (
+                                f"🔄 Встреча серии №{updated_series.id} на {start:%d.%m.%Y %H:%M} "
+                                "изменена напрямую в Google Calendar. Данные и напоминания обновлены."
+                            )
+                        else:
+                            original = occurrence.expected_start_at.astimezone(ZoneInfo(settings.timezone))
+                            message = (
+                                f"❌ Встреча серии №{updated_series.id} на {original:%d.%m.%Y %H:%M} "
+                                "удалена напрямую из Google Calendar и отменена в боте."
+                            )
+                        await bot.send_message(settings.admin_telegram_id, message)
+                except CalendarUnavailable:
+                    errors += 1
+                    LOGGER.warning(
+                        "calendar_occurrence_reconciliation_unavailable",
+                        extra={"occurrence_id": occurrence.id},
+                    )
+                    break
+                except Exception as exc:
+                    errors += 1
+                    LOGGER.exception(
+                        "calendar_occurrence_reconciliation_item_failed",
+                        extra={"occurrence_id": occurrence.id, "error_type": type(exc).__name__},
+                    )
     finally:
         await asyncio.to_thread(store.finish_sync_run, run_id, checked, changed, missing, errors)
     return {"checked": checked, "changed": changed, "missing": missing, "errors": errors}

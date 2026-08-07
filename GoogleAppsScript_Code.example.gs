@@ -46,6 +46,9 @@ function doPost(e) {
     if (payload.action === 'occurrenceDelete') {
       return jsonResponse_({ok: true, deleted: deleteOccurrence_(payload)});
     }
+    if (payload.action === 'occurrenceStatus') {
+      return jsonResponse_(getOccurrenceStatus_(payload));
+    }
     throw new Error('unknown_action');
   } catch (error) {
     return jsonResponse_({
@@ -176,6 +179,10 @@ function getEventStatus_(payload) {
   if (!event) {
     return {ok: true, exists: false};
   }
+  return eventStatus_(event);
+}
+
+function eventStatus_(event) {
   return {
     ok: true,
     exists: true,
@@ -290,6 +297,34 @@ function deleteOccurrence_(payload) {
   }
   event.deleteEvent();
   return true;
+}
+
+function getOccurrenceStatus_(payload) {
+  const event = findOccurrenceForStatus_(payload);
+  if (!event) {
+    return {ok: true, exists: false};
+  }
+  return eventStatus_(event);
+}
+
+function findOccurrenceForStatus_(payload) {
+  const current = findOccurrence_(payload);
+  if (current) {
+    return current;
+  }
+  requireText_(payload.eventId, 'event_id_required', 300);
+  const expected = parseDate_(payload.expectedStart);
+  const margin = 31 * 24 * 60 * 60 * 1000;
+  const originalMargin = 2 * 60 * 1000;
+  return CalendarApp.getDefaultCalendar()
+    .getEvents(new Date(expected.getTime() - margin), new Date(expected.getTime() + margin))
+    .find(function(event) {
+      if (event.getId() !== String(payload.eventId)) {
+        return false;
+      }
+      const original = event.getOriginalStartTime();
+      return original && Math.abs(original.getTime() - expected.getTime()) < originalMargin;
+    }) || null;
 }
 
 function findOccurrence_(payload) {

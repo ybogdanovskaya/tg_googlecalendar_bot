@@ -214,6 +214,22 @@ class AppsScriptCalendar:
             raise CalendarUnavailable("Apps Script did not return occurrence deletion status")
         return deleted
 
+    async def occurrence_state(
+        self,
+        series_id: str,
+        occurrence: EventOccurrence,
+    ) -> CalendarEventState:
+        response = await asyncio.to_thread(
+            self._post,
+            {
+                "action": "occurrenceStatus",
+                "eventId": series_id,
+                "lookupStart": occurrence.actual_start_at.astimezone(UTC).isoformat(),
+                "expectedStart": occurrence.expected_start_at.astimezone(UTC).isoformat(),
+            },
+        )
+        return self._parse_state(response, series_id)
+
     @staticmethod
     def _parse_state(response: dict[str, Any], event_id: str) -> CalendarEventState:
         exists = response.get("exists")

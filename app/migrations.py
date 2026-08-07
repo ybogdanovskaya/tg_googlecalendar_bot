@@ -221,6 +221,9 @@ MIGRATIONS = (
                 actual_end_at TEXT NOT NULL,
                 status TEXT NOT NULL,
                 google_event_id TEXT,
+                sync_state TEXT NOT NULL DEFAULT 'SYNCED',
+                last_synced_at TEXT,
+                google_updated_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE(series_id, expected_start_at)

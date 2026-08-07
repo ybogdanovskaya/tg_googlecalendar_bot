@@ -665,6 +665,120 @@ class AutomationStore:
             ).fetchall()
         return [self.db._row_to_request(row) for row in rows]
 
+    def list_occurrence_sync_candidates(
+        self,
+        limit: int = 20,
+    ) -> list[tuple[EventOccurrence, EventSeries]]:
+        with self.db._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT o.id AS occurrence_id, o.series_id
+                FROM event_occurrences AS o
+                JOIN event_series AS s ON s.id = o.series_id
+                WHERE s.status = ? AND s.google_series_id IS NOT NULL
+                  AND o.status IN (?, ?) AND o.expected_end_at > ?
+                ORDER BY COALESCE(o.last_synced_at, '1970-01-01'), o.expected_start_at
+                LIMIT ?
+                """,
+                (SERIES_ACTIVE, OCCURRENCE_SCHEDULED, OCCURRENCE_MOVED, _iso(datetime.now(UTC)), limit),
+            ).fetchall()
+        result: list[tuple[EventOccurrence, EventSeries]] = []
+        for row in rows:
+            occurrence = self.get_occurrence(int(row["occurrence_id"]))
+            series = self.get_series(int(row["series_id"]))
+            if occurrence and series:
+                result.append((occurrence, series))
+        return result
+
+    def apply_occurrence_state(
+        self,
+        occurrence_id: int,
+        state: CalendarEventState,
+    ) -> tuple[EventOccurrence, EventSeries, bool]:
+        now = _iso(datetime.now(UTC))
+        connection = self.db._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT o.* FROM event_occurrences AS o
+                JOIN event_series AS s ON s.id = o.series_id
+                WHERE o.id = ? AND s.status = ? AND o.status IN (?, ?)
+                """,
+                (occurrence_id, SERIES_ACTIVE, OCCURRENCE_SCHEDULED, OCCURRENCE_MOVED),
+            ).fetchone()
+            if row is None:
+                raise RequestNotEditableError("active occurrence not found")
+            changed = False
+            if not state.exists:
+                connection.execute(
+                    """
+                    UPDATE event_occurrences
+                    SET status = ?, sync_state = ?, last_synced_at = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (OCCURRENCE_MISSING, SYNC_MISSING, now, now, occurrence_id),
+                )
+                self._cancel_jobs_for_occurrence(connection, occurrence_id, now)
+                changed = True
+            else:
+                old_start = _dt(str(row["actual_start_at"]))
+                old_end = _dt(str(row["actual_end_at"]))
+                new_start = state.start_at or old_start
+                new_end = state.end_at or old_end
+                changed = old_start != new_start or old_end != new_end
+                expected_start = _dt(str(row["expected_start_at"]))
+                expected_end = _dt(str(row["expected_end_at"]))
+                status = (
+                    OCCURRENCE_SCHEDULED
+                    if new_start == expected_start and new_end == expected_end
+                    else OCCURRENCE_MOVED
+                )
+                connection.execute(
+                    """
+                    UPDATE event_occurrences
+                    SET actual_start_at = ?, actual_end_at = ?, status = ?, google_event_id = ?,
+                        sync_state = ?, last_synced_at = ?, google_updated_at = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        _iso(new_start),
+                        _iso(new_end),
+                        status,
+                        state.event_id,
+                        SYNC_CHANGED if changed else SYNCED,
+                        now,
+                        _iso(state.updated_at) if state.updated_at else None,
+                        now,
+                        occurrence_id,
+                    ),
+                )
+                if changed:
+                    self._cancel_jobs_for_occurrence(connection, occurrence_id, now)
+            connection.execute(
+                "UPDATE event_series SET last_synced_at = ?, sync_state = ?, updated_at = ? WHERE id = ?",
+                (now, SYNC_CHANGED if changed else SYNCED, now, int(row["series_id"])),
+            )
+            self.db._audit(
+                connection,
+                None,
+                "google_occurrence_synced",
+                "event_occurrence",
+                str(occurrence_id),
+                {"changed": changed, "exists": state.exists},
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        occurrence = self.get_occurrence(occurrence_id)
+        series = self.get_series(occurrence.series_id) if occurrence else None
+        if occurrence is None or series is None:
+            raise RuntimeError("synced occurrence not found")
+        return occurrence, series, changed
+
     def apply_event_state(self, request_id: int, state: CalendarEventState) -> tuple[MeetingRequest, bool]:
         now = _iso(datetime.now(UTC))
         connection = self.db._connect()

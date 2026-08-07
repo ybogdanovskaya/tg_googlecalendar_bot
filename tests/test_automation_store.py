@@ -11,6 +11,8 @@ from app.models import (
     JOB_DONE,
     JOB_PENDING,
     OCCURRENCE_CANCELLED,
+    OCCURRENCE_MISSING,
+    OCCURRENCE_MOVED,
     SERIES_DAILY,
     SERIES_ACTIVE,
     SYNC_MISSING,
@@ -94,6 +96,33 @@ class AutomationStoreTests(unittest.TestCase):
         self.assertEqual(cancelled.status, OCCURRENCE_CANCELLED)
         with self.assertRaises(RequestNotEditableError):
             self.store.cancel_occurrence(occurrence.id, 1)
+
+    def test_google_occurrence_change_and_deletion_update_local_state(self) -> None:
+        start = datetime.now(UTC) + timedelta(days=5)
+        series = self.create_series(start)
+        occurrence = self.store.list_occurrences(series.id)[0]
+        moved_start = start + timedelta(hours=2)
+        state = CalendarEventState(
+            True,
+            "instance-id",
+            moved_start,
+            moved_start + timedelta(minutes=30),
+            "Daily",
+            None,
+            None,
+            True,
+            datetime.now(UTC),
+        )
+        moved, _, changed = self.store.apply_occurrence_state(occurrence.id, state)
+        self.assertTrue(changed)
+        self.assertEqual(moved.status, OCCURRENCE_MOVED)
+        self.assertEqual(moved.actual_start_at, moved_start)
+        missing, _, changed = self.store.apply_occurrence_state(
+            occurrence.id,
+            CalendarEventState(False, "instance-id", None, None, None, None, None, None, None),
+        )
+        self.assertTrue(changed)
+        self.assertEqual(missing.status, OCCURRENCE_MISSING)
 
     def test_reminder_jobs_are_deduplicated_claimed_and_completed(self) -> None:
         now = datetime(2026, 8, 7, 9, 0, tzinfo=UTC)

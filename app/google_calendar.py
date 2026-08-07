@@ -293,6 +293,64 @@ class GoogleCalendar:
     async def delete_occurrence(self, series_id: str, occurrence: EventOccurrence) -> bool:
         return await asyncio.to_thread(self._delete_occurrence_sync, series_id, occurrence)
 
+    async def occurrence_state(
+        self,
+        series_id: str,
+        occurrence: EventOccurrence,
+    ) -> CalendarEventState:
+        return await asyncio.to_thread(self._occurrence_state_sync, series_id, occurrence)
+
+    def _occurrence_state_sync(
+        self,
+        series_id: str,
+        occurrence: EventOccurrence,
+    ) -> CalendarEventState:
+        try:
+            response = self._service().events().instances(
+                calendarId=self.calendar_id,
+                eventId=series_id,
+                timeMin=(occurrence.expected_start_at - timedelta(days=366)).astimezone(UTC).isoformat(),
+                timeMax=(occurrence.expected_start_at + timedelta(days=366)).astimezone(UTC).isoformat(),
+                showDeleted=True,
+                maxResults=2500,
+            ).execute()
+        except HttpError as exc:
+            if exc.resp.status in {404, 410}:
+                return CalendarEventState(False, series_id, None, None, None, None, None, None, None)
+            raise CalendarUnavailable("Google occurrence status failed") from exc
+        expected = occurrence.expected_start_at.astimezone(UTC)
+        item = None
+        for candidate in response.get("items", []):
+            original_value = (candidate.get("originalStartTime") or {}).get("dateTime")
+            if not original_value:
+                continue
+            try:
+                original = datetime.fromisoformat(str(original_value).replace("Z", "+00:00")).astimezone(UTC)
+            except ValueError:
+                continue
+            if abs((original - expected).total_seconds()) < 120:
+                item = candidate
+                break
+        if item is None or item.get("status") == "cancelled":
+            return CalendarEventState(False, series_id, None, None, None, None, None, None, None)
+        try:
+            start_at = datetime.fromisoformat(str(item["start"]["dateTime"]).replace("Z", "+00:00")).astimezone(UTC)
+            end_at = datetime.fromisoformat(str(item["end"]["dateTime"]).replace("Z", "+00:00")).astimezone(UTC)
+            updated = datetime.fromisoformat(str(item["updated"]).replace("Z", "+00:00")).astimezone(UTC) if item.get("updated") else None
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CalendarUnavailable("Invalid Google occurrence status") from exc
+        return CalendarEventState(
+            True,
+            str(item.get("id") or series_id),
+            start_at,
+            end_at,
+            str(item.get("summary") or ""),
+            str(item.get("description") or ""),
+            str(item.get("location") or ""),
+            str(item.get("transparency") or "opaque") != "transparent",
+            updated,
+        )
+
     def _delete_occurrence_sync(self, series_id: str, occurrence: EventOccurrence) -> bool:
         try:
             instance_id = self._instance_id(series_id, occurrence.actual_start_at)
@@ -310,6 +368,3 @@ class GoogleCalendar:
             raise CalendarUnavailable("Google occurrence deletion failed") from exc
         except Exception as exc:
             raise CalendarUnavailable("Google occurrence deletion failed") from exc
-        except Exception as exc:
-            LOGGER.exception("google_event_delete_failed", extra={"event_id": event_id})
-            raise CalendarUnavailable("Google event deletion failed") from exc

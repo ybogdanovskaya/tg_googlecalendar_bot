@@ -86,7 +86,7 @@ class AppsScriptCalendarTests(unittest.IsolatedAsyncioTestCase):
 
             def post(payload):
                 captured.append(payload)
-                if payload["action"] == "status":
+                if payload["action"] in {"status", "occurrenceStatus"}:
                     return {
                         "ok": True,
                         "exists": True,
@@ -122,10 +122,23 @@ class AppsScriptCalendarTests(unittest.IsolatedAsyncioTestCase):
                 await client.update_occurrence("series-id", occurrence, now + timedelta(hours=1), now + timedelta(hours=1, minutes=30)),
                 "series-id",
             )
+            occurrence_state = await client.occurrence_state("series-id", occurrence)
+            self.assertTrue(occurrence_state.exists)
             self.assertTrue(await client.delete_occurrence("series-id", occurrence))
             self.assertTrue(await client.delete_series("series-id"))
             actions = [item["action"] for item in captured]
-            self.assertEqual(actions, ["status", "seriesCreate", "seriesUpdate", "occurrenceUpdate", "occurrenceDelete", "seriesDelete"])
+            self.assertEqual(
+                actions,
+                [
+                    "status",
+                    "seriesCreate",
+                    "seriesUpdate",
+                    "occurrenceUpdate",
+                    "occurrenceStatus",
+                    "occurrenceDelete",
+                    "seriesDelete",
+                ],
+            )
 
 
 if __name__ == "__main__":
