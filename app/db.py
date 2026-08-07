@@ -23,11 +23,32 @@ from app.models import (
     CHANGE_PENDING,
     CHANGE_REJECTED,
     CHANGE_RESCHEDULE,
+    JOB_CANCELLED,
+    JOB_DONE,
+    JOB_FAILED,
+    JOB_MEETING_REMINDER,
+    JOB_PENDING,
+    JOB_PENDING_REMINDER,
+    JOB_PROCESSING,
+    OCCURRENCE_CANCELLED,
+    OCCURRENCE_MISSING,
+    OCCURRENCE_MOVED,
+    OCCURRENCE_SCHEDULED,
     PENDING,
     REJECTED,
+    SERIES_ACTIVE,
+    SERIES_CANCELLED,
+    SERIES_CREATING,
+    SERIES_FAILED,
+    SYNC_CHANGED,
+    SYNC_MISSING,
+    SYNCED,
     ChangeRequest,
+    EventOccurrence,
+    EventSeries,
     MeetingRequest,
     RequestAlternative,
+    ScheduledJob,
 )
 
 
@@ -107,6 +128,7 @@ class Database:
         range_start: datetime,
         range_end: datetime,
         exclude_request_id: int | None = None,
+        exclude_occurrence_id: int | None = None,
     ) -> list[tuple[datetime, datetime]]:
         now = _iso(datetime.now(UTC))
         with self._connect() as connection:
@@ -173,9 +195,30 @@ class Database:
                     exclude_request_id,
                 ),
             ).fetchall()
+            occurrences = connection.execute(
+                """
+                SELECT o.actual_start_at AS start_at, o.actual_end_at AS end_at
+                FROM event_occurrences AS o
+                JOIN event_series AS s ON s.id = o.series_id
+                WHERE o.actual_start_at < ? AND o.actual_end_at > ?
+                  AND s.status IN (?, ?) AND s.blocks_calendar = 1
+                  AND o.status IN (?, ?)
+                  AND (? IS NULL OR o.id <> ?)
+                """,
+                (
+                    _iso(range_end),
+                    _iso(range_start),
+                    SERIES_ACTIVE,
+                    SERIES_CREATING,
+                    OCCURRENCE_SCHEDULED,
+                    OCCURRENCE_MOVED,
+                    exclude_occurrence_id,
+                    exclude_occurrence_id,
+                ),
+            ).fetchall()
         return [
             (_dt(row["start_at"]), _dt(row["end_at"]))
-            for row in [*rows, *alternatives, *changes]
+            for row in [*rows, *alternatives, *changes, *occurrences]
         ]
 
     def create_request(

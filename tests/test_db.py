@@ -110,8 +110,8 @@ class DatabaseTests(unittest.TestCase):
 
     def test_schema_is_versioned(self) -> None:
         version, release = self.db.schema_info()
-        self.assertEqual(version, 3)
-        self.assertEqual(release, "release-b")
+        self.assertEqual(version, 4)
+        self.assertEqual(release, "release-c")
 
     def test_latest_requests_are_displayed_with_newest_at_bottom(self) -> None:
         base = datetime(2026, 8, 11, 9, 0, tzinfo=UTC)

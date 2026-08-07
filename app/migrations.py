@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 LOGGER = logging.getLogger(__name__)
-RELEASE_ID = "release-b"
+RELEASE_ID = "release-c"
 
 
 @dataclass(frozen=True)
@@ -173,6 +173,111 @@ MIGRATIONS = (
             """
             CREATE INDEX IF NOT EXISTS idx_change_status
             ON change_requests(status, created_at)
+            """,
+        ),
+    ),
+    Migration(
+        4,
+        "release_c_automation",
+        (
+            "ALTER TABLE meeting_requests ADD COLUMN sync_state TEXT NOT NULL DEFAULT 'SYNCED'",
+            "ALTER TABLE meeting_requests ADD COLUMN last_synced_at TEXT",
+            "ALTER TABLE meeting_requests ADD COLUMN google_updated_at TEXT",
+            """
+            CREATE TABLE IF NOT EXISTS event_series (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_by INTEGER NOT NULL,
+                admin_name TEXT NOT NULL,
+                admin_username TEXT,
+                email TEXT,
+                subject TEXT NOT NULL,
+                description TEXT,
+                location TEXT,
+                start_at TEXT NOT NULL,
+                end_at TEXT NOT NULL,
+                frequency TEXT NOT NULL,
+                until_date TEXT NOT NULL,
+                status TEXT NOT NULL,
+                google_series_id TEXT,
+                blocks_calendar INTEGER NOT NULL DEFAULT 1,
+                allow_overlap INTEGER NOT NULL DEFAULT 0,
+                sync_state TEXT NOT NULL DEFAULT 'SYNCED',
+                last_synced_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_series_owner_status
+            ON event_series(created_by, status, start_at)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS event_occurrences (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                series_id INTEGER NOT NULL REFERENCES event_series(id),
+                expected_start_at TEXT NOT NULL,
+                expected_end_at TEXT NOT NULL,
+                actual_start_at TEXT NOT NULL,
+                actual_end_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                google_event_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(series_id, expected_start_at)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_occurrences_slot
+            ON event_occurrences(actual_start_at, actual_end_at, status)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS scheduled_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_type TEXT NOT NULL,
+                request_id INTEGER REFERENCES meeting_requests(id),
+                occurrence_id INTEGER REFERENCES event_occurrences(id),
+                recipient_telegram_id INTEGER NOT NULL,
+                due_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 5,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                claimed_at TEXT,
+                last_error_code TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                CHECK ((request_id IS NOT NULL) != (occurrence_id IS NOT NULL))
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_jobs_due
+            ON scheduled_jobs(status, due_at)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS notification_deliveries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL REFERENCES scheduled_jobs(id),
+                attempt_number INTEGER NOT NULL,
+                attempted_at TEXT NOT NULL,
+                result TEXT NOT NULL,
+                error_code TEXT
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_deliveries_job
+            ON notification_deliveries(job_id, attempt_number)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS sync_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                checked_count INTEGER NOT NULL DEFAULT 0,
+                changed_count INTEGER NOT NULL DEFAULT 0,
+                missing_count INTEGER NOT NULL DEFAULT 0,
+                error_count INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL
+            )
             """,
         ),
     ),

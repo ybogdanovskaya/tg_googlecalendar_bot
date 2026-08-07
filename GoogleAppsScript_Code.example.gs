@@ -28,6 +28,24 @@ function doPost(e) {
     if (payload.action === 'delete') {
       return jsonResponse_({ok: true, deleted: deleteEvent_(payload)});
     }
+    if (payload.action === 'status') {
+      return jsonResponse_(getEventStatus_(payload));
+    }
+    if (payload.action === 'seriesCreate') {
+      return jsonResponse_({ok: true, eventId: createSeries_(payload)});
+    }
+    if (payload.action === 'seriesUpdate') {
+      return jsonResponse_({ok: true, eventId: updateSeries_(payload)});
+    }
+    if (payload.action === 'seriesDelete') {
+      return jsonResponse_({ok: true, deleted: deleteSeries_(payload)});
+    }
+    if (payload.action === 'occurrenceUpdate') {
+      return jsonResponse_({ok: true, eventId: updateOccurrence_(payload)});
+    }
+    if (payload.action === 'occurrenceDelete') {
+      return jsonResponse_({ok: true, deleted: deleteOccurrence_(payload)});
+    }
     throw new Error('unknown_action');
   } catch (error) {
     return jsonResponse_({
@@ -150,6 +168,161 @@ function deleteEvent_(payload) {
   } finally {
     lock.releaseLock();
   }
+}
+
+function getEventStatus_(payload) {
+  requireText_(payload.eventId, 'event_id_required', 300);
+  const event = CalendarApp.getDefaultCalendar().getEventById(String(payload.eventId));
+  if (!event) {
+    return {ok: true, exists: false};
+  }
+  return {
+    ok: true,
+    exists: true,
+    eventId: event.getId(),
+    start: event.getStartTime().toISOString(),
+    end: event.getEndTime().toISOString(),
+    subject: event.getTitle(),
+    description: event.getDescription(),
+    location: event.getLocation(),
+    transparent: !isBlocking_(event),
+    updated: event.getLastUpdated().toISOString(),
+  };
+}
+
+function createSeries_(payload) {
+  const start = parseDate_(payload.start);
+  const end = parseDate_(payload.end);
+  validateRange_(start, end);
+  requireText_(payload.seriesId, 'series_id_required', 100);
+  requireText_(payload.subject, 'subject_required', 200);
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    throw new Error('calendar_busy_try_again');
+  }
+  try {
+    const calendar = CalendarApp.getDefaultCalendar();
+    const propertyKey = 'telegram_series_' + String(payload.seriesId);
+    const savedId = PropertiesService.getScriptProperties().getProperty(propertyKey);
+    if (savedId) {
+      const saved = calendar.getEventSeriesById(savedId);
+      if (saved) {
+        return saved.getId();
+      }
+    }
+    if (!payload.allowOverlap && calendar.getEvents(start, end).some(isBlocking_)) {
+      throw new Error('slot_busy');
+    }
+    const options = {
+      description: String(payload.description || ''),
+      location: String(payload.location || ''),
+    };
+    if (String(payload.email || '').trim()) {
+      options.guests = String(payload.email).trim();
+      options.sendInvites = true;
+    }
+    const series = calendar.createEventSeries(
+      String(payload.subject),
+      start,
+      end,
+      buildRecurrence_(payload),
+      options,
+    );
+    series.setTag('telegram_series_id', String(payload.seriesId));
+    series.setTransparency(payload.transparent
+      ? CalendarApp.EventTransparency.TRANSPARENT
+      : CalendarApp.EventTransparency.OPAQUE);
+    series.setGuestsCanModify(false);
+    series.setGuestsCanInviteOthers(false);
+    PropertiesService.getScriptProperties().setProperty(propertyKey, series.getId());
+    return series.getId();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function updateSeries_(payload) {
+  requireText_(payload.eventId, 'event_id_required', 300);
+  requireText_(payload.subject, 'subject_required', 200);
+  const start = parseDate_(payload.start);
+  const end = parseDate_(payload.end);
+  validateRange_(start, end);
+  const series = CalendarApp.getDefaultCalendar().getEventSeriesById(String(payload.eventId));
+  if (!series) {
+    throw new Error('series_not_found');
+  }
+  series.setTitle(String(payload.subject));
+  series.setDescription(String(payload.description || ''));
+  series.setLocation(String(payload.location || ''));
+  series.setTransparency(payload.transparent
+    ? CalendarApp.EventTransparency.TRANSPARENT
+    : CalendarApp.EventTransparency.OPAQUE);
+  series.setRecurrence(buildRecurrence_(payload), start, end);
+  return series.getId();
+}
+
+function deleteSeries_(payload) {
+  requireText_(payload.eventId, 'event_id_required', 300);
+  const series = CalendarApp.getDefaultCalendar().getEventSeriesById(String(payload.eventId));
+  if (!series) {
+    return false;
+  }
+  series.deleteEventSeries();
+  return true;
+}
+
+function updateOccurrence_(payload) {
+  const event = findOccurrence_(payload);
+  if (!event) {
+    throw new Error('occurrence_not_found');
+  }
+  const start = parseDate_(payload.start);
+  const end = parseDate_(payload.end);
+  validateRange_(start, end);
+  event.setTime(start, end);
+  return event.getId();
+}
+
+function deleteOccurrence_(payload) {
+  const event = findOccurrence_(payload);
+  if (!event) {
+    return false;
+  }
+  event.deleteEvent();
+  return true;
+}
+
+function findOccurrence_(payload) {
+  requireText_(payload.eventId, 'event_id_required', 300);
+  const lookup = parseDate_(payload.lookupStart);
+  const margin = 2 * 60 * 1000;
+  return CalendarApp.getDefaultCalendar()
+    .getEvents(new Date(lookup.getTime() - margin), new Date(lookup.getTime() + margin))
+    .find(function(event) {
+      return event.getId() === String(payload.eventId)
+        && Math.abs(event.getStartTime().getTime() - lookup.getTime()) < margin;
+    }) || null;
+}
+
+function buildRecurrence_(payload) {
+  const recurrence = CalendarApp.newRecurrence().setTimeZone('Europe/Moscow');
+  const frequency = String(payload.frequency || '');
+  let rule;
+  if (frequency === 'DAILY') {
+    rule = recurrence.addDailyRule();
+  } else if (frequency === 'WEEKLY') {
+    rule = recurrence.addWeeklyRule();
+  } else if (frequency === 'MONTHLY') {
+    rule = recurrence.addMonthlyRule();
+  } else {
+    throw new Error('invalid_frequency');
+  }
+  const until = new Date(String(payload.untilDate || '') + 'T23:59:59+03:00');
+  if (isNaN(until.getTime())) {
+    throw new Error('invalid_until_date');
+  }
+  rule.until(until);
+  return recurrence;
 }
 
 function isBlocking_(event) {

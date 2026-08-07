@@ -10,7 +10,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from app.calendar_client import CalendarUnavailable
-from app.models import MeetingRequest
+from app.models import CalendarEventState, EventOccurrence, EventSeries, MeetingRequest
 
 
 LOGGER = logging.getLogger(__name__)
@@ -120,6 +120,125 @@ class AppsScriptCalendar:
         if not isinstance(deleted, bool):
             raise CalendarUnavailable("Apps Script did not return deletion status")
         return deleted
+
+    async def event_state(self, event_id: str) -> CalendarEventState:
+        response = await asyncio.to_thread(self._post, {"action": "status", "eventId": event_id})
+        return self._parse_state(response, event_id)
+
+    async def create_series(self, series: EventSeries) -> str:
+        response = await asyncio.to_thread(
+            self._post,
+            {
+                "action": "seriesCreate",
+                "seriesId": str(series.id),
+                "start": series.start_at.astimezone(UTC).isoformat(),
+                "end": series.end_at.astimezone(UTC).isoformat(),
+                "untilDate": series.until_date,
+                "frequency": series.frequency,
+                "subject": series.subject,
+                "email": series.email or "",
+                "description": series.description or "",
+                "location": series.location or "",
+                "allowOverlap": series.allow_overlap,
+                "transparent": not series.blocks_calendar,
+            },
+        )
+        event_id = response.get("eventId")
+        if not isinstance(event_id, str) or not event_id:
+            raise CalendarUnavailable("Apps Script did not return a series ID")
+        return event_id
+
+    async def update_series(self, series: EventSeries) -> str:
+        if not series.google_series_id:
+            raise CalendarUnavailable("Series has no Google ID")
+        response = await asyncio.to_thread(
+            self._post,
+            {
+                "action": "seriesUpdate",
+                "eventId": series.google_series_id,
+                "start": series.start_at.astimezone(UTC).isoformat(),
+                "end": series.end_at.astimezone(UTC).isoformat(),
+                "untilDate": series.until_date,
+                "frequency": series.frequency,
+                "subject": series.subject,
+                "description": series.description or "",
+                "location": series.location or "",
+                "transparent": not series.blocks_calendar,
+            },
+        )
+        event_id = response.get("eventId")
+        if not isinstance(event_id, str) or not event_id:
+            raise CalendarUnavailable("Apps Script did not update the series")
+        return event_id
+
+    async def delete_series(self, series_id: str) -> bool:
+        response = await asyncio.to_thread(self._post, {"action": "seriesDelete", "eventId": series_id})
+        deleted = response.get("deleted")
+        if not isinstance(deleted, bool):
+            raise CalendarUnavailable("Apps Script did not return series deletion status")
+        return deleted
+
+    async def update_occurrence(
+        self,
+        series_id: str,
+        occurrence: EventOccurrence,
+        start_at: datetime,
+        end_at: datetime,
+    ) -> str:
+        response = await asyncio.to_thread(
+            self._post,
+            {
+                "action": "occurrenceUpdate",
+                "eventId": series_id,
+                "lookupStart": occurrence.actual_start_at.astimezone(UTC).isoformat(),
+                "start": start_at.astimezone(UTC).isoformat(),
+                "end": end_at.astimezone(UTC).isoformat(),
+            },
+        )
+        event_id = response.get("eventId")
+        if not isinstance(event_id, str) or not event_id:
+            raise CalendarUnavailable("Apps Script did not update the occurrence")
+        return event_id
+
+    async def delete_occurrence(self, series_id: str, occurrence: EventOccurrence) -> bool:
+        response = await asyncio.to_thread(
+            self._post,
+            {
+                "action": "occurrenceDelete",
+                "eventId": series_id,
+                "lookupStart": occurrence.actual_start_at.astimezone(UTC).isoformat(),
+            },
+        )
+        deleted = response.get("deleted")
+        if not isinstance(deleted, bool):
+            raise CalendarUnavailable("Apps Script did not return occurrence deletion status")
+        return deleted
+
+    @staticmethod
+    def _parse_state(response: dict[str, Any], event_id: str) -> CalendarEventState:
+        exists = response.get("exists")
+        if not isinstance(exists, bool):
+            raise CalendarUnavailable("Apps Script returned invalid event status")
+        if not exists:
+            return CalendarEventState(False, event_id, None, None, None, None, None, None, None)
+        try:
+            start_at = datetime.fromisoformat(str(response["start"]).replace("Z", "+00:00")).astimezone(UTC)
+            end_at = datetime.fromisoformat(str(response["end"]).replace("Z", "+00:00")).astimezone(UTC)
+            updated_raw = response.get("updated")
+            updated_at = datetime.fromisoformat(str(updated_raw).replace("Z", "+00:00")).astimezone(UTC) if updated_raw else None
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CalendarUnavailable("Apps Script returned invalid event dates") from exc
+        return CalendarEventState(
+            True,
+            event_id,
+            start_at,
+            end_at,
+            str(response.get("subject") or ""),
+            str(response.get("description") or ""),
+            str(response.get("location") or ""),
+            not bool(response.get("transparent")),
+            updated_at,
+        )
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         body = dict(payload)
