@@ -6,6 +6,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.fsm.storage.memory import SimpleEventIsolation
 
 from app.apps_script_calendar import AppsScriptCalendar
 from app.bot import create_router
@@ -41,7 +42,7 @@ async def run() -> None:
 
         calendar = GoogleCalendar(settings.google_token_file, settings.google_calendar_id)
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dispatcher = Dispatcher()
+    dispatcher = Dispatcher(events_isolation=SimpleEventIsolation())
     dispatcher.include_router(create_router(settings, database, calendar))
     LOGGER.info("bot_starting")
     try:

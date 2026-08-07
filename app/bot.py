@@ -205,6 +205,15 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
         await callback.answer("Нет доступа", show_alert=True)
         return False
 
+    async def block_during_active_form(callback: CallbackQuery, state: FSMContext) -> bool:
+        if await state.get_state() is None:
+            return False
+        await callback.answer(
+            "Сначала завершите текущую операцию или нажмите «Отменить».",
+            show_alert=True,
+        )
+        return True
+
     def request_owned_pending(request_id: int, telegram_id: int) -> MeetingRequest | None:
         request = db.get_request(request_id)
         if request is None or request.telegram_id != telegram_id or request.status != PENDING:
@@ -499,13 +508,17 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
 
     @router.callback_query(F.data == "home")
     async def home(callback: CallbackQuery, state: FSMContext) -> None:
+        if await block_during_active_form(callback, state):
+            return
         await state.clear()
         await callback.answer()
         if callback.message:
             await show_home(callback.message, callback.from_user.id)
 
     @router.callback_query(F.data == "help")
-    async def help_callback(callback: CallbackQuery) -> None:
+    async def help_callback(callback: CallbackQuery, state: FSMContext) -> None:
+        if await block_during_active_form(callback, state):
+            return
         await callback.answer()
         if callback.message:
             await callback.message.answer(help_text(), reply_markup=main_menu(is_admin(callback.from_user.id)))
@@ -515,7 +528,9 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
         await message.answer(help_text(), reply_markup=main_menu(bool(message.from_user and is_admin(message.from_user.id))))
 
     @router.callback_query(F.data == "privacy")
-    async def privacy_callback(callback: CallbackQuery) -> None:
+    async def privacy_callback(callback: CallbackQuery, state: FSMContext) -> None:
+        if await block_during_active_form(callback, state):
+            return
         await callback.answer()
         if callback.message:
             await callback.message.answer(privacy_text(settings), reply_markup=main_menu(is_admin(callback.from_user.id)))
@@ -526,6 +541,8 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
 
     @router.callback_query(F.data == "book")
     async def begin_booking(callback: CallbackQuery, state: FSMContext) -> None:
+        if await block_during_active_form(callback, state):
+            return
         if not await ensure_consent(callback) or callback.message is None:
             return
         current = rules()
@@ -821,6 +838,8 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
 
     @router.callback_query(F.data == "my")
     async def my_callback(callback: CallbackQuery, state: FSMContext) -> None:
+        if await block_during_active_form(callback, state):
+            return
         await state.clear()
         await callback.answer()
         if callback.message:
@@ -834,6 +853,8 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
 
     @router.callback_query(F.data.startswith("edit:"))
     async def edit_request(callback: CallbackQuery, state: FSMContext) -> None:
+        if await block_during_active_form(callback, state):
+            return
         await state.clear()
         request_id = int(callback.data.split(":", 1)[1])
         request = await asyncio.to_thread(request_owned_pending, request_id, callback.from_user.id)
@@ -846,6 +867,8 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
 
     @router.callback_query(F.data.startswith("editfield:"))
     async def choose_edit_field(callback: CallbackQuery, state: FSMContext) -> None:
+        if await block_during_active_form(callback, state):
+            return
         _, request_raw, field = callback.data.split(":", 2)
         request_id = int(request_raw)
         request = await asyncio.to_thread(request_owned_pending, request_id, callback.from_user.id)
@@ -930,6 +953,8 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
 
     @router.callback_query(F.data.startswith("editwhen:"))
     async def edit_when(callback: CallbackQuery, state: FSMContext) -> None:
+        if await block_during_active_form(callback, state):
+            return
         request_id = int(callback.data.split(":", 1)[1])
         request = await asyncio.to_thread(request_owned_pending, request_id, callback.from_user.id)
         if request is None:
@@ -948,6 +973,8 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
 
     @router.callback_query(F.data.startswith("editdur:"))
     async def edit_duration(callback: CallbackQuery, state: FSMContext) -> None:
+        if await block_during_active_form(callback, state):
+            return
         _, request_raw, duration_raw = callback.data.split(":", 2)
         request_id = int(request_raw)
         duration = int(duration_raw)
@@ -966,6 +993,8 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
 
     @router.callback_query(F.data.startswith("cancel:"))
     async def cancel_request(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+        if await block_during_active_form(callback, state):
+            return
         await state.clear()
         request_id = int(callback.data.split(":", 1)[1])
         changed = await asyncio.to_thread(db.cancel_pending, request_id, callback.from_user.id)
@@ -982,8 +1011,10 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
             LOGGER.exception("admin_cancellation_notification_failed", extra={"request_id": request_id})
 
     @router.callback_query(F.data == "admin:list")
-    async def admin_list_callback(callback: CallbackQuery) -> None:
+    async def admin_list_callback(callback: CallbackQuery, state: FSMContext) -> None:
         if not await require_admin(callback):
+            return
+        if await block_during_active_form(callback, state):
             return
         await callback.answer()
         if callback.message:
@@ -999,6 +1030,8 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
     @router.callback_query(F.data == "admin:settings")
     async def admin_settings_callback(callback: CallbackQuery, state: FSMContext) -> None:
         if not await require_admin(callback):
+            return
+        if await block_during_active_form(callback, state):
             return
         await state.clear()
         await callback.answer()
@@ -1231,8 +1264,10 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
             await render_admin_settings(callback.message)
 
     @router.callback_query(F.data.startswith("reject:"))
-    async def reject_request(callback: CallbackQuery, bot: Bot) -> None:
+    async def reject_request(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
         if not await require_admin(callback):
+            return
+        if await block_during_active_form(callback, state):
             return
         request_id = int(callback.data.split(":", 1)[1])
         request = await asyncio.to_thread(db.reject, request_id, callback.from_user.id)
@@ -1252,8 +1287,10 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
             LOGGER.exception("user_rejection_notification_failed", extra={"request_id": request.id})
 
     @router.callback_query(F.data.startswith("approve:"))
-    async def approve_request(callback: CallbackQuery, bot: Bot) -> None:
+    async def approve_request(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
         if not await require_admin(callback):
+            return
+        if await block_during_active_form(callback, state):
             return
         request_id = int(callback.data.split(":", 1)[1])
         request = await asyncio.to_thread(db.claim_for_approval, request_id, callback.from_user.id)
