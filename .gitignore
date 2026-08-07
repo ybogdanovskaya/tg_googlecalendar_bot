@@ -1,0 +1,17 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+data/
+logs/
+secrets/
+*.sqlite3
+token.json
+credentials.json
+telegram_bot_token.txt
+google_apps_script_secret.txt
+GoogleAppsScript_Code.gs
+google_apps_script_url.txt

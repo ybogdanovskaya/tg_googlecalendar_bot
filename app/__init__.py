@@ -1,0 +1,1 @@
+"""Telegram Calendar Bot ultramvp."""

@@ -1,0 +1,25 @@
+[Unit]
+Description=Telegram Google Calendar Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=calendarbot
+Group=calendarbot
+WorkingDirectory=/opt/calendar-bot
+EnvironmentFile=/etc/calendar-bot/calendar-bot.env
+ExecStart=/opt/calendar-bot/.venv/bin/python -m app.main
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/calendar-bot /var/log/calendar-bot
+UMask=0077
+MemoryMax=220M
+
+[Install]
+WantedBy=multi-user.target
