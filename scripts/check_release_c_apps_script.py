@@ -122,7 +122,8 @@ def main() -> None:
             },
             True,
         )
-        if moved_state.get("exists") is not True or str(moved_state.get("start") or "") != moved.isoformat().replace("+00:00", "Z"):
+        moved_value = datetime.fromisoformat(str(moved_state.get("start") or "").replace("Z", "+00:00"))
+        if moved_state.get("exists") is not True or moved_value != moved:
             raise RuntimeError("moved_occurrence_status_is_invalid")
 
         second = shifted + timedelta(days=1)
