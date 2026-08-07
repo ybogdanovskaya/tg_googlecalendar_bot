@@ -17,7 +17,9 @@ from app.booking_rules import load_rules
 from app.bot import EMAIL_RE, _keyboard, cancel_keyboard, home_keyboard
 from app.calendar_client import CalendarClient, CalendarUnavailable
 from app.config import Settings
+from app.date_picker import calendar_keyboard, month_from_callback
 from app.db import Database, RequestNotEditableError, SlotConflictError
+from app.input_parsing import parse_time_input
 from app.models import (
     OCCURRENCE_CANCELLED,
     OCCURRENCE_MISSING,
@@ -74,7 +76,7 @@ def _date(value: str) -> date:
 
 
 def _clock(value: str) -> time:
-    return datetime.strptime(value.strip(), "%H:%M").time()
+    return parse_time_input(value)
 
 
 def _overlaps(first_start: datetime, first_end: datetime, second_start: datetime, second_end: datetime) -> bool:
@@ -230,6 +232,18 @@ def create_release_c_router(
             ),
         )
 
+    async def ask_series_participant(message: Message) -> None:
+        await message.answer(
+            "Кого добавить участником?",
+            reply_markup=_keyboard(
+                [
+                    [InlineKeyboardButton(text="👤 Только меня", callback_data="c:series:email:self")],
+                    [InlineKeyboardButton(text="✉️ Добавить гостя по email", callback_data="c:series:email:guest")],
+                    [InlineKeyboardButton(text="✖ Отменить", callback_data="abort")],
+                ]
+            ),
+        )
+
     @router.callback_query(F.data == "c:series")
     async def series_menu(callback: CallbackQuery, state: FSMContext) -> None:
         if not await require_admin(callback):
@@ -249,6 +263,77 @@ def create_release_c_router(
         if callback.message:
             await callback.message.answer("Введите тему повторяющейся встречи:", reply_markup=cancel_keyboard())
 
+    @router.callback_query(F.data == "datepick:noop")
+    async def calendar_noop(callback: CallbackQuery) -> None:
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("cdate:"))
+    async def calendar_choice(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await require_admin(callback):
+            return
+        try:
+            _, kind, action, raw_value = callback.data.split(":", 3)
+            data = await state.get_data()
+            expected_states = {
+                "start": ReleaseCFlow.series_date.state,
+                "until": ReleaseCFlow.series_until.state,
+                "occurrence": ReleaseCFlow.occurrence_date.state,
+            }
+            if kind not in expected_states or await state.get_state() != expected_states[kind]:
+                raise ValueError
+            today = datetime.now(zone).date()
+            if kind == "start":
+                minimum, maximum = today, today + timedelta(days=366)
+            elif kind == "until":
+                minimum = date.fromisoformat(str(data["start_date"]))
+                maximum = minimum + timedelta(days=366)
+            elif kind == "occurrence":
+                minimum, maximum = today, today + timedelta(days=366)
+            else:
+                raise ValueError
+            if action == "nav":
+                shown = month_from_callback(raw_value)
+                if not date(minimum.year, minimum.month, 1) <= shown <= date(maximum.year, maximum.month, 1):
+                    raise ValueError
+                await callback.answer()
+                if callback.message:
+                    await callback.message.edit_reply_markup(
+                        reply_markup=calendar_keyboard(f"cdate:{kind}", shown, minimum, maximum)
+                    )
+                return
+            if action != "day":
+                raise ValueError
+            selected = date.fromisoformat(raw_value)
+            if not minimum <= selected <= maximum:
+                raise ValueError
+        except (KeyError, TypeError, ValueError):
+            await callback.answer("Дата недоступна. Откройте календарь заново.", show_alert=True)
+            return
+        await callback.answer(f"Выбрано: {selected:%d.%m.%Y}")
+        if callback.message:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        if kind == "start":
+            await state.update_data(start_date=selected.isoformat())
+            await state.set_state(ReleaseCFlow.series_time)
+            if callback.message:
+                await callback.message.answer(
+                    "Введите время первой встречи, например 930 или 1430 (МСК):",
+                    reply_markup=cancel_keyboard(),
+                )
+        elif kind == "until":
+            await state.update_data(until_date=selected.isoformat())
+            await state.set_state(None)
+            if callback.message:
+                await ask_series_participant(callback.message)
+        else:
+            await state.update_data(move_date=selected.isoformat())
+            await state.set_state(ReleaseCFlow.occurrence_time)
+            if callback.message:
+                await callback.message.answer(
+                    "Введите новое время, например 930 или 1430 (МСК):",
+                    reply_markup=cancel_keyboard(),
+                )
+
     @router.message(ReleaseCFlow.series_subject)
     async def series_subject(message: Message, state: FSMContext) -> None:
         if message.from_user is None or not is_admin(message.from_user.id):
@@ -260,7 +345,11 @@ def create_release_c_router(
             return
         await state.update_data(subject=value)
         await state.set_state(ReleaseCFlow.series_date)
-        await message.answer("Введите дату первой встречи в формате ДД.ММ.ГГГГ:", reply_markup=cancel_keyboard())
+        today = datetime.now(zone).date()
+        await message.answer(
+            "Выберите дату первой встречи:",
+            reply_markup=calendar_keyboard("cdate:start", today, today, today + timedelta(days=366)),
+        )
 
     @router.message(ReleaseCFlow.series_date)
     async def series_date(message: Message, state: FSMContext) -> None:
@@ -273,14 +362,14 @@ def create_release_c_router(
             return
         await state.update_data(start_date=value.isoformat())
         await state.set_state(ReleaseCFlow.series_time)
-        await message.answer("Введите время первой встречи в формате ЧЧ:ММ (МСК):", reply_markup=cancel_keyboard())
+        await message.answer("Введите время первой встречи, например 930 или 1430 (МСК):", reply_markup=cancel_keyboard())
 
     @router.message(ReleaseCFlow.series_time)
     async def series_time(message: Message, state: FSMContext) -> None:
         try:
             value = _clock(message.text or "")
         except ValueError:
-            await message.answer("Введите время, например 10:30.")
+            await message.answer("Введите время четырьмя цифрами, например 0930 или 1430.")
             return
         await state.update_data(start_time=value.isoformat(timespec="minutes"))
         durations = load_rules(db, settings).durations
@@ -332,9 +421,14 @@ def create_release_c_router(
         if callback.message:
             suffix = " Если такого числа в месяце нет, этот месяц будет пропущен." if frequency == SERIES_MONTHLY else ""
             await callback.message.answer(
-                "Введите последнюю дату серии включительно в формате ДД.ММ.ГГГГ. Максимум — один год."
+                "Выберите последнюю дату серии включительно. Максимум — один год."
                 + suffix,
-                reply_markup=cancel_keyboard(),
+                reply_markup=calendar_keyboard(
+                    "cdate:until",
+                    date.fromisoformat(str((await state.get_data())["start_date"])),
+                    date.fromisoformat(str((await state.get_data())["start_date"])),
+                    date.fromisoformat(str((await state.get_data())["start_date"])) + timedelta(days=366),
+                ),
             )
 
     @router.message(ReleaseCFlow.series_until)
@@ -349,16 +443,8 @@ def create_release_c_router(
             await message.answer("Конечная дата должна быть не раньше первой встречи и не дальше одного года.")
             return
         await state.update_data(until_date=value.isoformat())
-        await message.answer(
-            "Кого добавить участником?",
-            reply_markup=_keyboard(
-                [
-                    [InlineKeyboardButton(text="👤 Только меня", callback_data="c:series:email:self")],
-                    [InlineKeyboardButton(text="✉️ Добавить гостя по email", callback_data="c:series:email:guest")],
-                    [InlineKeyboardButton(text="✖ Отменить", callback_data="abort")],
-                ]
-            ),
-        )
+        await state.set_state(None)
+        await ask_series_participant(message)
 
     async def ask_description(message: Message, state: FSMContext) -> None:
         await state.set_state(ReleaseCFlow.series_description)
@@ -687,7 +773,11 @@ def create_release_c_router(
         await state.set_data({"occurrence_id": occurrence_id})
         await callback.answer()
         if callback.message:
-            await callback.message.answer("Введите новую дату в формате ДД.ММ.ГГГГ:", reply_markup=cancel_keyboard())
+            today = datetime.now(zone).date()
+            await callback.message.answer(
+                "Выберите новую дату:",
+                reply_markup=calendar_keyboard("cdate:occurrence", today, today, today + timedelta(days=366)),
+            )
 
     @router.message(ReleaseCFlow.occurrence_date)
     async def occurrence_date(message: Message, state: FSMContext) -> None:
@@ -700,14 +790,14 @@ def create_release_c_router(
             return
         await state.update_data(move_date=value.isoformat())
         await state.set_state(ReleaseCFlow.occurrence_time)
-        await message.answer("Введите новое время в формате ЧЧ:ММ (МСК):", reply_markup=cancel_keyboard())
+        await message.answer("Введите новое время, например 930 или 1430 (МСК):", reply_markup=cancel_keyboard())
 
     @router.message(ReleaseCFlow.occurrence_time)
     async def occurrence_time(message: Message, state: FSMContext) -> None:
         try:
             value = _clock(message.text or "")
         except ValueError:
-            await message.answer("Введите время, например 14:30.")
+            await message.answer("Введите время четырьмя цифрами, например 0930 или 1430.")
             return
         data = await state.get_data()
         occurrence = automation.get_occurrence(int(data["occurrence_id"]))
@@ -886,7 +976,7 @@ def create_release_c_router(
         await callback.answer()
         if callback.message:
             await callback.message.answer(
-                "Введите новое время начала для всей серии в формате ЧЧ:ММ (МСК). Даты и длительность сохранятся:",
+                "Введите новое время начала всей серии, например 930 или 1430 (МСК). Даты и длительность сохранятся:",
                 reply_markup=cancel_keyboard(),
             )
 
@@ -895,7 +985,7 @@ def create_release_c_router(
         try:
             value = _clock(message.text or "")
         except ValueError:
-            await message.answer("Введите время, например 09:30.")
+            await message.answer("Введите время четырьмя цифрами, например 0930 или 1430.")
             return
         data = await state.get_data()
         series = automation.get_series(int(data["series_id"]))

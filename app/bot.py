@@ -29,6 +29,7 @@ from app.booking_rules import (
 from app.automation_store import AutomationStore
 from app.calendar_client import CalendarClient, CalendarUnavailable
 from app.config import Settings
+from app.date_picker import calendar_keyboard, month_from_callback
 from app.db import Database, RequestNotEditableError, SlotConflictError
 from app.models import APPROVED, APPROVING, CANCELLED, CANCELLED_BY_ADMIN, PENDING, REJECTED, MeetingRequest
 from app.notification_rules import load_notification_rules
@@ -1268,10 +1269,47 @@ def create_router(
         await state.set_data({})
         await callback.answer()
         if callback.message:
+            today = datetime.now(zone).date()
             await callback.message.answer(
-                "Введите дату, которую нужно закрыть, в формате ДД.ММ.ГГГГ:",
-                reply_markup=_keyboard([[InlineKeyboardButton(text="✖ Отменить", callback_data="abort")]]),
+                "Выберите дату, которую нужно закрыть:",
+                reply_markup=calendar_keyboard("adate:closed", today, today, today + timedelta(days=730)),
             )
+
+    @router.callback_query(F.data.startswith("adate:closed:"))
+    async def add_closed_date_calendar(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await require_admin(callback):
+            return
+        try:
+            _, _, action, raw_value = callback.data.split(":", 3)
+            if await state.get_state() != AdminSettings.closed_date.state:
+                raise ValueError
+            today = datetime.now(zone).date()
+            maximum = today + timedelta(days=730)
+            if action == "nav":
+                shown = month_from_callback(raw_value)
+                if not date(today.year, today.month, 1) <= shown <= date(maximum.year, maximum.month, 1):
+                    raise ValueError
+                await callback.answer()
+                if callback.message:
+                    await callback.message.edit_reply_markup(
+                        reply_markup=calendar_keyboard("adate:closed", shown, today, maximum)
+                    )
+                return
+            if action != "day":
+                raise ValueError
+            value = date.fromisoformat(raw_value)
+            if not today <= value <= maximum:
+                raise ValueError
+        except (TypeError, ValueError):
+            await callback.answer("Дата недоступна. Откройте календарь заново.", show_alert=True)
+            return
+        changed = await asyncio.to_thread(db.add_closed_date, value.isoformat(), callback.from_user.id)
+        await state.clear()
+        await callback.answer("Дата закрыта" if changed else "Дата уже закрыта")
+        if callback.message:
+            await callback.message.edit_reply_markup(reply_markup=None)
+            await callback.message.answer("Дата закрыта." if changed else "Эта дата уже была закрыта.")
+            await render_admin_settings(callback.message)
 
     @router.message(AdminSettings.closed_date)
     async def receive_closed_date(message: Message, state: FSMContext) -> None:

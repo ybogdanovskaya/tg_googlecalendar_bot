@@ -4,7 +4,7 @@ import asyncio
 import html
 import logging
 from dataclasses import replace
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, F, Router
@@ -17,7 +17,9 @@ from app.automation_store import AutomationStore
 from app.bot import EMAIL_RE, _keyboard, cancel_keyboard, format_request, home_keyboard
 from app.calendar_client import CalendarClient, CalendarUnavailable
 from app.config import Settings
+from app.date_picker import calendar_keyboard, month_from_callback
 from app.db import Database, RequestNotEditableError, SlotConflictError
+from app.input_parsing import parse_time_input
 from app.models import CHANGE_CANCEL, CHANGE_RESCHEDULE, PENDING
 from app.notification_rules import load_notification_rules
 
@@ -63,8 +65,73 @@ def create_release_b_router(
         return datetime.combine(parsed, time.min, zone)
 
     def parse_start(day: str, value: str) -> datetime:
-        parsed_time = datetime.strptime(value.strip(), "%H:%M").time()
+        parsed_time = parse_time_input(value)
         return datetime.combine(datetime.fromisoformat(day).date(), parsed_time, zone)
+
+    async def show_date_picker(
+        message: Message,
+        prefix: str,
+        prompt: str,
+        minimum: datetime,
+        maximum: datetime,
+    ) -> None:
+        await message.answer(
+            prompt,
+            reply_markup=calendar_keyboard(prefix, minimum.date(), minimum.date(), maximum.date()),
+        )
+
+    @router.callback_query(F.data.startswith("bdate:"))
+    async def date_picker_choice(callback: CallbackQuery, state: FSMContext) -> None:
+        try:
+            _, kind, action, raw_value = callback.data.split(":", 3)
+            expected_states = {
+                "alternative": ReleaseBFlow.alternative_date.state,
+                "move": ReleaseBFlow.move_date.state,
+                "manual": ReleaseBFlow.manual_date.state,
+            }
+            if kind not in expected_states or await state.get_state() != expected_states[kind]:
+                raise ValueError
+            if kind in {"alternative", "manual"} and not is_admin(callback.from_user.id):
+                await callback.answer("Нет доступа", show_alert=True)
+                return
+            today = datetime.now(zone).date()
+            if kind in {"alternative", "move"}:
+                horizon = load_rules(db, settings).booking_horizon_days
+                minimum, maximum = today, today + timedelta(days=horizon - 1)
+            else:
+                minimum, maximum = today, today + timedelta(days=366)
+            if action == "nav":
+                shown = month_from_callback(raw_value)
+                if not date(minimum.year, minimum.month, 1) <= shown <= date(maximum.year, maximum.month, 1):
+                    raise ValueError
+                await callback.answer()
+                if callback.message:
+                    await callback.message.edit_reply_markup(
+                        reply_markup=calendar_keyboard(f"bdate:{kind}", shown, minimum, maximum)
+                    )
+                return
+            if action != "day":
+                raise ValueError
+            selected = date.fromisoformat(raw_value)
+            if not minimum <= selected <= maximum:
+                raise ValueError
+        except (KeyError, TypeError, ValueError):
+            await callback.answer("Дата недоступна. Откройте календарь заново.", show_alert=True)
+            return
+        await state.update_data(day=selected.isoformat())
+        next_states = {
+            "alternative": ReleaseBFlow.alternative_time,
+            "move": ReleaseBFlow.move_time,
+            "manual": ReleaseBFlow.manual_time,
+        }
+        await state.set_state(next_states[kind])
+        await callback.answer(f"Выбрано: {selected:%d.%m.%Y}")
+        if callback.message:
+            await callback.message.edit_reply_markup(reply_markup=None)
+            await callback.message.answer(
+                "Введите время, например 930 или 1430 (МСК):",
+                reply_markup=cancel_keyboard(),
+            )
 
     def validate_user_time(start: datetime) -> None:
         rules = load_rules(db, settings)
@@ -201,7 +268,15 @@ def create_release_b_router(
         await state.set_data({"request_id": int(request_raw), "duration": int(duration_raw)})
         await callback.answer()
         if callback.message:
-            await callback.message.answer("Введите дату альтернативы ДД.ММ.ГГГГ:", reply_markup=cancel_keyboard())
+            today = datetime.now(zone)
+            horizon = load_rules(db, settings).booking_horizon_days
+            await show_date_picker(
+                callback.message,
+                "bdate:alternative",
+                "Выберите дату альтернативы:",
+                today,
+                today + timedelta(days=horizon - 1),
+            )
 
     @router.message(ReleaseBFlow.alternative_date)
     async def alternative_date(message: Message, state: FSMContext) -> None:
@@ -214,7 +289,7 @@ def create_release_b_router(
             return
         await state.update_data(day=day.date().isoformat())
         await state.set_state(ReleaseBFlow.alternative_time)
-        await message.answer("Введите время по Москве в формате ЧЧ:ММ:", reply_markup=cancel_keyboard())
+        await message.answer("Введите время по Москве, например 930 или 1430:", reply_markup=cancel_keyboard())
 
     @router.message(ReleaseBFlow.alternative_time)
     async def alternative_time(message: Message, state: FSMContext, bot: Bot) -> None:
@@ -226,7 +301,7 @@ def create_release_b_router(
             start = parse_start(str(data["day"]), message.text or "")
             validate_user_time(start)
         except ValueError as exc:
-            await message.answer(f"Время недоступно: {exc or 'проверьте формат ЧЧ:ММ'}.")
+            await message.answer(f"Время недоступно: {exc or 'введите, например, 930 или 1430'}.")
             return
         end = start + timedelta(minutes=int(data["duration"]))
         try:
@@ -380,7 +455,15 @@ def create_release_b_router(
         await state.set_data({"request_id": int(request_raw), "duration": int(duration_raw)})
         await callback.answer()
         if callback.message:
-            await callback.message.answer("Введите новую дату ДД.ММ.ГГГГ:", reply_markup=cancel_keyboard())
+            today = datetime.now(zone)
+            horizon = load_rules(db, settings).booking_horizon_days
+            await show_date_picker(
+                callback.message,
+                "bdate:move",
+                "Выберите новую дату:",
+                today,
+                today + timedelta(days=horizon - 1),
+            )
 
     @router.message(ReleaseBFlow.move_date)
     async def move_date(message: Message, state: FSMContext) -> None:
@@ -394,7 +477,7 @@ def create_release_b_router(
             return
         await state.update_data(day=day.date().isoformat())
         await state.set_state(ReleaseBFlow.move_time)
-        await message.answer("Введите новое время ЧЧ:ММ по Москве:", reply_markup=cancel_keyboard())
+        await message.answer("Введите новое время, например 930 или 1430 (МСК):", reply_markup=cancel_keyboard())
 
     @router.message(ReleaseBFlow.move_time)
     async def move_time(message: Message, state: FSMContext, bot: Bot) -> None:
@@ -582,7 +665,14 @@ def create_release_b_router(
             return
         await state.update_data(subject=value)
         await state.set_state(ReleaseBFlow.manual_date)
-        await message.answer("Введите дату встречи ДД.ММ.ГГГГ:", reply_markup=cancel_keyboard())
+        today = datetime.now(zone)
+        await show_date_picker(
+            message,
+            "bdate:manual",
+            "Выберите дату встречи:",
+            today,
+            today + timedelta(days=366),
+        )
 
     @router.message(ReleaseBFlow.manual_date)
     async def manual_date(message: Message, state: FSMContext) -> None:
@@ -598,7 +688,7 @@ def create_release_b_router(
             return
         await state.update_data(day=day.date().isoformat())
         await state.set_state(ReleaseBFlow.manual_time)
-        await message.answer("Введите время начала ЧЧ:ММ по Москве:", reply_markup=cancel_keyboard())
+        await message.answer("Введите время начала, например 930 или 1430 (МСК):", reply_markup=cancel_keyboard())
 
     @router.message(ReleaseBFlow.manual_time)
     async def manual_time(message: Message, state: FSMContext) -> None:
@@ -611,7 +701,7 @@ def create_release_b_router(
             if start <= datetime.now(zone):
                 raise ValueError
         except ValueError:
-            await message.answer("Введите будущее время в формате ЧЧ:ММ. Для администратора минимального срока нет.")
+            await message.answer("Введите будущее время, например 930 или 1430. Для администратора минимального срока нет.")
             return
         await state.update_data(start_at=start.isoformat())
         durations = load_rules(db, settings).durations
