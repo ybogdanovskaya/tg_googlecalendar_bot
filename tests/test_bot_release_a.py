@@ -6,8 +6,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
-from app.bot import create_router, format_request, main_menu, privacy_text
+from app.bot import cancel_keyboard, create_router, format_request, home_keyboard, main_menu, privacy_text
 from app.db import Database
+from app.main import BOT_COMMANDS
 from app.models import MeetingRequest, PENDING
 
 
@@ -78,6 +79,12 @@ class ReleaseABotTests(unittest.TestCase):
         self.assertIn("admin:settings", admin_callbacks)
         self.assertNotIn("admin:settings", user_callbacks)
         self.assertIn("privacy", user_callbacks)
+
+    def test_navigation_without_manual_start_command_is_available(self) -> None:
+        self.assertEqual(home_keyboard().inline_keyboard[0][0].callback_data, "home")
+        self.assertEqual(cancel_keyboard().inline_keyboard[0][0].callback_data, "abort")
+        commands = {item.command: item.description for item in BOT_COMMANDS}
+        self.assertEqual(commands["start"], "Главное меню")
 
     def test_router_is_constructed_with_release_a_handlers(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

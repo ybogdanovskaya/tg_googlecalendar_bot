@@ -7,6 +7,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import SimpleEventIsolation
+from aiogram.types import BotCommand, MenuButtonCommands
 
 from app.apps_script_calendar import AppsScriptCalendar
 from app.bot import create_router
@@ -16,6 +17,23 @@ from app.logging_setup import configure_logging
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+BOT_COMMANDS = [
+    BotCommand(command="start", description="Главное меню"),
+    BotCommand(command="my", description="Мои заявки"),
+    BotCommand(command="help", description="Помощь"),
+    BotCommand(command="privacy", description="Конфиденциальность"),
+]
+
+
+async def configure_bot_menu(bot: Bot) -> None:
+    try:
+        await bot.set_my_commands(BOT_COMMANDS)
+        await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+        LOGGER.info("bot_menu_configured")
+    except Exception:
+        LOGGER.exception("bot_menu_configuration_failed")
 
 
 async def run() -> None:
@@ -44,6 +62,7 @@ async def run() -> None:
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dispatcher = Dispatcher(events_isolation=SimpleEventIsolation())
     dispatcher.include_router(create_router(settings, database, calendar))
+    await configure_bot_menu(bot)
     LOGGER.info("bot_starting")
     try:
         await dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types())

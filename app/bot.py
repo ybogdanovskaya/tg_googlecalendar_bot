@@ -79,6 +79,14 @@ def _keyboard(rows: list[list[InlineKeyboardButton]]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def home_keyboard() -> InlineKeyboardMarkup:
+    return _keyboard([[InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")]])
+
+
+def cancel_keyboard() -> InlineKeyboardMarkup:
+    return _keyboard([[InlineKeyboardButton(text="✖ Отменить", callback_data="abort")]])
+
+
 def main_menu(is_admin: bool) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="📅 Записаться", callback_data="book")],
@@ -175,7 +183,8 @@ def _request_edit_keyboard(request_id: int) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="✏️ Изменить", callback_data=f"edit:{request_id}"),
                 InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel:{request_id}"),
-            ]
+            ],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")],
         ]
     )
 
@@ -357,6 +366,7 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
                 format_request(request, settings.timezone, include_private=False),
                 reply_markup=buttons,
             )
+        await message.answer("Вернуться к действиям:", reply_markup=home_keyboard())
 
     async def show_admin_requests(message: Message) -> None:
         requests = await asyncio.to_thread(db.list_pending)
@@ -672,7 +682,8 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
         await state.update_data(start_at=start_at.isoformat())
         await state.set_state(Booking.email)
         await callback.message.edit_text(
-            f"Выбрано: {start_local:%d.%m.%Y %H:%M}, {duration} мин (МСК).\n\nВведите email участника:"
+            f"Выбрано: {start_local:%d.%m.%Y %H:%M}, {duration} мин (МСК).\n\nВведите email участника:",
+            reply_markup=cancel_keyboard(),
         )
         await callback.answer()
 
@@ -684,7 +695,7 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
             return
         await state.update_data(email=value)
         await state.set_state(Booking.subject)
-        await message.answer("Введите тему встречи:")
+        await message.answer("Введите тему встречи:", reply_markup=cancel_keyboard())
 
     @router.message(Booking.subject)
     async def receive_subject(message: Message, state: FSMContext) -> None:
@@ -696,7 +707,12 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
         await state.set_state(Booking.description)
         await message.answer(
             "Добавьте описание или пропустите шаг:",
-            reply_markup=_keyboard([[InlineKeyboardButton(text="Пропустить", callback_data="skip:description")]]),
+            reply_markup=_keyboard(
+                [
+                    [InlineKeyboardButton(text="Пропустить", callback_data="skip:description")],
+                    [InlineKeyboardButton(text="✖ Отменить", callback_data="abort")],
+                ]
+            ),
         )
 
     async def ask_location(message: Message, state: FSMContext, description: str | None) -> None:
@@ -704,7 +720,12 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
         await state.set_state(Booking.location)
         await message.answer(
             "Укажите адрес или ссылку на видеовстречу, либо пропустите:",
-            reply_markup=_keyboard([[InlineKeyboardButton(text="Пропустить", callback_data="skip:location")]]),
+            reply_markup=_keyboard(
+                [
+                    [InlineKeyboardButton(text="Пропустить", callback_data="skip:location")],
+                    [InlineKeyboardButton(text="✖ Отменить", callback_data="abort")],
+                ]
+            ),
         )
 
     @router.message(Booking.description)
@@ -785,13 +806,19 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
         ):
             await state.clear()
             await callback.answer("Условия записи изменились", show_alert=True)
-            await callback.message.edit_text("Этот слот больше недоступен. Начните запись заново: /start")
+            await callback.message.edit_text(
+                "Этот слот больше недоступен.",
+                reply_markup=home_keyboard(),
+            )
             return
         try:
             if not await calendar.is_free(start_at, end_at):
                 await callback.answer("Слот уже занят", show_alert=True)
                 await state.clear()
-                await callback.message.edit_text("К сожалению, слот уже занят. Начните запись заново: /start")
+                await callback.message.edit_text(
+                    "К сожалению, слот уже занят.",
+                    reply_markup=home_keyboard(),
+                )
                 return
             request = await asyncio.to_thread(
                 db.create_request,
@@ -809,7 +836,10 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
         except SlotConflictError:
             await callback.answer("Слот уже зарезервирован", show_alert=True)
             await state.clear()
-            await callback.message.edit_text("Слот уже выбрал другой пользователь. Начните запись заново: /start")
+            await callback.message.edit_text(
+                "Слот уже выбрал другой пользователь.",
+                reply_markup=home_keyboard(),
+            )
             return
         except CalendarUnavailable:
             await callback.answer("Google Calendar недоступен", show_alert=True)
@@ -818,7 +848,13 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
         await callback.answer("Заявка отправлена")
         await callback.message.edit_text(
             format_request(request, settings.timezone, include_private=False)
-            + f"\n\nСлот зарезервирован на {current.hold_hours} ч."
+            + f"\n\nСлот зарезервирован на {current.hold_hours} ч.",
+            reply_markup=_keyboard(
+                [
+                    [InlineKeyboardButton(text="📋 Мои заявки", callback_data="my")],
+                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")],
+                ]
+            ),
         )
         try:
             await bot.send_message(
@@ -1004,7 +1040,10 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
         request = db.get_request(request_id)
         await callback.answer("Заявка отменена")
         if callback.message and request:
-            await callback.message.edit_text(format_request(request, settings.timezone, include_private=False))
+            await callback.message.edit_text(
+                format_request(request, settings.timezone, include_private=False),
+                reply_markup=home_keyboard(),
+            )
         try:
             await bot.send_message(settings.admin_telegram_id, f"Пользователь отменил заявку №{request_id}.")
         except Exception:
@@ -1282,6 +1321,7 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
                 request.telegram_id,
                 format_request(request, settings.timezone, include_private=False)
                 + "\n\nК сожалению, заявка не согласована.",
+                reply_markup=home_keyboard(),
             )
         except Exception:
             LOGGER.exception("user_rejection_notification_failed", extra={"request_id": request.id})
@@ -1335,6 +1375,7 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
                 approved.telegram_id,
                 format_request(approved, settings.timezone, include_private=False)
                 + "\n\nВстреча согласована. Приглашение отправлено на ваш email.",
+                reply_markup=home_keyboard(),
             )
         except Exception:
             LOGGER.exception("user_approval_notification_failed", extra={"request_id": request_id})
@@ -1344,7 +1385,7 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
         await state.clear()
         await callback.answer("Действие отменено")
         if callback.message:
-            await callback.message.edit_text("Действие отменено. Вернуться в меню: /start")
+            await callback.message.edit_text("Действие отменено.", reply_markup=home_keyboard())
 
     @router.callback_query(F.data == "noop")
     async def noop(callback: CallbackQuery) -> None:
@@ -1352,6 +1393,9 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
 
     @router.message()
     async def unknown_message(message: Message) -> None:
-        await message.answer("Я помогу выбрать время для встречи. Откройте меню командой /start.")
+        await message.answer(
+            "Я помогу выбрать время для встречи.",
+            reply_markup=home_keyboard(),
+        )
 
     return router
