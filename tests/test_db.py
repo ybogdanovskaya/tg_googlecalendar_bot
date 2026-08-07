@@ -178,6 +178,26 @@ class DatabaseTests(unittest.TestCase):
         self.assertTrue(draft.admin_override)
         self.assertEqual(draft.source, "ADMIN")
 
+    def test_nonblocking_admin_event_does_not_hide_slot(self) -> None:
+        start = datetime(2026, 8, 16, 9, 0, tzinfo=UTC)
+        draft = self.db.create_admin_draft(
+            admin_id=100,
+            admin_name="Admin",
+            admin_username=None,
+            email=None,
+            subject="Reminder",
+            description=None,
+            location=None,
+            start_at=start,
+            end_at=start + timedelta(hours=1),
+            blocks_calendar=False,
+            allow_overlap=False,
+        )
+        self.db.complete_approval(draft.id, 100, "free-event")
+        self.assertEqual(self.db.active_intervals(start, start + timedelta(hours=1)), [])
+        overlapping = self.create(start + timedelta(minutes=15), 30)
+        self.assertEqual(overlapping.id, draft.id + 1)
+
 
 if __name__ == "__main__":
     unittest.main()

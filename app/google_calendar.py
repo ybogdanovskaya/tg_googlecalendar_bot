@@ -87,10 +87,12 @@ class GoogleCalendar:
             "description": "\n".join(description_parts),
             "start": {"dateTime": request.start_at.astimezone(UTC).isoformat()},
             "end": {"dateTime": request.end_at.astimezone(UTC).isoformat()},
-            "attendees": [{"email": request.email}],
             "guestsCanModify": False,
+            "transparency": "opaque" if request.blocks_calendar else "transparent",
             "extendedProperties": {"private": {"telegram_request_id": str(request.id)}},
         }
+        if request.email:
+            body["attendees"] = [{"email": request.email}]
         if request.location:
             body["location"] = request.location
         try:
@@ -116,3 +118,49 @@ class GoogleCalendar:
         except Exception as exc:
             LOGGER.exception("google_event_create_failed", extra={"request_id": request.id})
             raise CalendarUnavailable("Google event creation failed") from exc
+
+    async def update_event(self, request: MeetingRequest) -> str:
+        return await asyncio.to_thread(self._update_event_sync, request)
+
+    def _update_event_sync(self, request: MeetingRequest) -> str:
+        if not request.google_event_id:
+            raise CalendarUnavailable("Meeting has no Google event ID")
+        body: dict[str, Any] = {
+            "summary": request.subject,
+            "description": request.description or "",
+            "start": {"dateTime": request.start_at.astimezone(UTC).isoformat()},
+            "end": {"dateTime": request.end_at.astimezone(UTC).isoformat()},
+            "location": request.location or "",
+            "transparency": "opaque" if request.blocks_calendar else "transparent",
+        }
+        try:
+            event = self._service().events().patch(
+                calendarId=self.calendar_id,
+                eventId=request.google_event_id,
+                body=body,
+                sendUpdates="all",
+            ).execute()
+            return str(event["id"])
+        except Exception as exc:
+            LOGGER.exception("google_event_update_failed", extra={"request_id": request.id})
+            raise CalendarUnavailable("Google event update failed") from exc
+
+    async def delete_event(self, event_id: str) -> bool:
+        return await asyncio.to_thread(self._delete_event_sync, event_id)
+
+    def _delete_event_sync(self, event_id: str) -> bool:
+        try:
+            self._service().events().delete(
+                calendarId=self.calendar_id,
+                eventId=event_id,
+                sendUpdates="all",
+            ).execute()
+            return True
+        except HttpError as exc:
+            if exc.resp.status in {404, 410}:
+                return False
+            LOGGER.exception("google_event_delete_failed", extra={"event_id": event_id})
+            raise CalendarUnavailable("Google event deletion failed") from exc
+        except Exception as exc:
+            LOGGER.exception("google_event_delete_failed", extra={"event_id": event_id})
+            raise CalendarUnavailable("Google event deletion failed") from exc

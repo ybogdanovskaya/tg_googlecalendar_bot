@@ -29,7 +29,7 @@ from app.booking_rules import (
 from app.calendar_client import CalendarClient, CalendarUnavailable
 from app.config import Settings
 from app.db import Database, RequestNotEditableError, SlotConflictError
-from app.models import APPROVED, APPROVING, CANCELLED, PENDING, REJECTED, MeetingRequest
+from app.models import APPROVED, APPROVING, CANCELLED, CANCELLED_BY_ADMIN, PENDING, REJECTED, MeetingRequest
 from app.slots import available_slots
 
 
@@ -100,6 +100,10 @@ def main_menu(is_admin: bool) -> InlineKeyboardMarkup:
         rows.extend(
             [
                 [InlineKeyboardButton(text="🛠 Заявки на рассмотрении", callback_data="admin:list")],
+                [
+                    InlineKeyboardButton(text="🔄 Переносы и отмены", callback_data="b:changes"),
+                    InlineKeyboardButton(text="➕ Создать встречу", callback_data="b:manual"),
+                ],
                 [InlineKeyboardButton(text="⚙️ Настройки", callback_data="admin:settings")],
             ]
         )
@@ -121,6 +125,7 @@ def format_request(
         APPROVED: "согласована",
         REJECTED: "отклонена",
         CANCELLED: "отменена",
+        CANCELLED_BY_ADMIN: "отменена администратором",
     }
     current = (now or datetime.now(UTC)).astimezone(UTC)
     status = status_labels.get(request.status, request.status)
@@ -365,6 +370,16 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
             buttons = None
             if request.status == PENDING:
                 buttons = _request_edit_keyboard(request.id, include_home=is_last)
+            elif request.status == APPROVED:
+                rows = [
+                    [
+                        InlineKeyboardButton(text="🔄 Запросить перенос", callback_data=f"b:move:{request.id}"),
+                        InlineKeyboardButton(text="❌ Запросить отмену", callback_data=f"b:cancel:{request.id}"),
+                    ]
+                ]
+                if is_last:
+                    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")])
+                buttons = _keyboard(rows)
             elif is_last:
                 buttons = home_keyboard()
             await message.answer(
@@ -385,7 +400,8 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
                         [
                             InlineKeyboardButton(text="✅ Согласовать", callback_data=f"approve:{request.id}"),
                             InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject:{request.id}"),
-                        ]
+                        ],
+                        [InlineKeyboardButton(text="✏️ Изменить / предложить время", callback_data=f"b:admin:req:{request.id}")],
                     ]
                 )
             await message.answer(format_request(request, settings.timezone), reply_markup=buttons)

@@ -115,6 +115,7 @@ class Database:
                 SELECT start_at, end_at
                 FROM meeting_requests
                 WHERE start_at < ? AND end_at > ?
+                  AND blocks_calendar = 1
                   AND (
                     status = ?
                     OR (status IN (?, ?) AND hold_until > ?)
@@ -138,6 +139,7 @@ class Database:
                 FROM request_alternatives AS a
                 JOIN meeting_requests AS r ON r.id = a.request_id
                 WHERE a.start_at < ? AND a.end_at > ?
+                  AND r.blocks_calendar = 1
                   AND a.status = ? AND a.hold_until > ?
                   AND (? IS NULL OR r.id <> ?)
                 """,
@@ -154,7 +156,9 @@ class Database:
                 """
                 SELECT c.proposed_start_at AS start_at, c.proposed_end_at AS end_at
                 FROM change_requests AS c
+                JOIN meeting_requests AS r ON r.id = c.request_id
                 WHERE c.change_type = ?
+                  AND r.blocks_calendar = 1
                   AND c.status IN (?, ?)
                   AND c.proposed_start_at < ? AND c.proposed_end_at > ?
                   AND (? IS NULL OR c.request_id <> ?)
@@ -198,6 +202,7 @@ class Database:
                 """
                 SELECT id FROM meeting_requests
                 WHERE start_at < ? AND end_at > ?
+                  AND blocks_calendar = 1
                   AND (
                     status = ?
                     OR (status IN (?, ?) AND hold_until > ?)
@@ -356,6 +361,7 @@ class Database:
                 """
                 SELECT id FROM meeting_requests
                 WHERE id <> ? AND start_at < ? AND end_at > ?
+                  AND blocks_calendar = 1
                   AND (
                     status = ?
                     OR (status IN (?, ?) AND hold_until > ?)
@@ -469,6 +475,7 @@ class Database:
                 """
                 SELECT id FROM meeting_requests
                 WHERE id <> ? AND start_at < ? AND end_at > ?
+                  AND blocks_calendar = 1
                   AND (status = ? OR (status IN (?, ?) AND hold_until > ?))
                 LIMIT 1
                 """,
@@ -555,6 +562,7 @@ class Database:
                 """
                 SELECT id FROM meeting_requests
                 WHERE id <> ? AND start_at < ? AND end_at > ?
+                  AND blocks_calendar = 1
                   AND (status = ? OR (status IN (?, ?) AND hold_until > ?))
                 LIMIT 1
                 """,
@@ -645,7 +653,7 @@ class Database:
                     """
                     SELECT id FROM meeting_requests
                     WHERE id <> ? AND start_at < ? AND end_at > ?
-                      AND status = ? LIMIT 1
+                      AND blocks_calendar = 1 AND status = ? LIMIT 1
                     """,
                     (request_id, _iso(proposed_end_at), _iso(proposed_start_at), APPROVED),
                 ).fetchone()
@@ -744,18 +752,20 @@ class Database:
                 raise RequestNotEditableError("change is not being processed")
             request_id = int(row["request_id"])
             if row["change_type"] == CHANGE_CANCEL:
-                connection.execute(
+                changed = connection.execute(
                     "UPDATE meeting_requests SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
                     (CANCELLED_BY_ADMIN, now, request_id, APPROVED),
                 )
             else:
-                connection.execute(
+                changed = connection.execute(
                     """
                     UPDATE meeting_requests SET start_at = ?, end_at = ?, updated_at = ?
                     WHERE id = ? AND status = ?
                     """,
                     (row["proposed_start_at"], row["proposed_end_at"], now, request_id, APPROVED),
                 )
+            if changed.rowcount != 1:
+                raise RequestNotEditableError("approved meeting is no longer available")
             connection.execute(
                 "UPDATE change_requests SET status = ?, updated_at = ? WHERE id = ?",
                 (CHANGE_APPROVED, now, change_id),
@@ -797,6 +807,7 @@ class Database:
                     """
                     SELECT id FROM meeting_requests
                     WHERE start_at < ? AND end_at > ?
+                      AND blocks_calendar = 1
                       AND (status = ? OR (status IN (?, ?) AND hold_until > ?))
                     LIMIT 1
                     """,
