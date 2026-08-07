@@ -112,6 +112,13 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(version, 2)
         self.assertEqual(release, "release-a")
 
+    def test_latest_requests_are_displayed_with_newest_at_bottom(self) -> None:
+        base = datetime(2026, 8, 11, 9, 0, tzinfo=UTC)
+        for index in range(4):
+            self.create(base + timedelta(hours=index), 30)
+        recent = self.db.list_user_requests(100, limit=3)
+        self.assertEqual([item.id for item in recent], [2, 3, 4])
+
 
 if __name__ == "__main__":
     unittest.main()

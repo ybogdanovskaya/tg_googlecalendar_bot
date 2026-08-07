@@ -177,16 +177,16 @@ def _date_from_callback(raw: str) -> date:
     return datetime.strptime(raw, "%Y%m%d").date()
 
 
-def _request_edit_keyboard(request_id: int) -> InlineKeyboardMarkup:
-    return _keyboard(
+def _request_edit_keyboard(request_id: int, include_home: bool = True) -> InlineKeyboardMarkup:
+    rows = [
         [
-            [
-                InlineKeyboardButton(text="✏️ Изменить", callback_data=f"edit:{request_id}"),
-                InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel:{request_id}"),
-            ],
-            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")],
+            InlineKeyboardButton(text="✏️ Изменить", callback_data=f"edit:{request_id}"),
+            InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel:{request_id}"),
         ]
-    )
+    ]
+    if include_home:
+        rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")])
+    return _keyboard(rows)
 
 
 def create_router(settings: Settings, db: Database, calendar: CalendarClient) -> Router:
@@ -360,13 +360,17 @@ def create_router(settings: Settings, db: Database, calendar: CalendarClient) ->
             await message.answer("У вас пока нет заявок.", reply_markup=main_menu(is_admin(telegram_id)))
             return
         await message.answer("Последние заявки:")
-        for request in requests:
-            buttons = _request_edit_keyboard(request.id) if request.status == PENDING else None
+        for index, request in enumerate(requests):
+            is_last = index == len(requests) - 1
+            buttons = None
+            if request.status == PENDING:
+                buttons = _request_edit_keyboard(request.id, include_home=is_last)
+            elif is_last:
+                buttons = home_keyboard()
             await message.answer(
                 format_request(request, settings.timezone, include_private=False),
                 reply_markup=buttons,
             )
-        await message.answer("Вернуться к действиям:", reply_markup=home_keyboard())
 
     async def show_admin_requests(message: Message) -> None:
         requests = await asyncio.to_thread(db.list_pending)

@@ -203,10 +203,13 @@ class Database:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT * FROM meeting_requests
-                WHERE telegram_id = ?
-                ORDER BY created_at DESC
-                LIMIT ?
+                SELECT * FROM (
+                    SELECT * FROM meeting_requests
+                    WHERE telegram_id = ?
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                ) AS recent_requests
+                ORDER BY created_at ASC, id ASC
                 """,
                 (telegram_id, limit),
             ).fetchall()
