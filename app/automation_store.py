@@ -184,6 +184,40 @@ class AutomationStore:
             )
             self.db._audit(connection, None, "series_create_failed", "event_series", str(series_id), {"reason": reason})
 
+    def retry_series_draft(self, series_id: int, admin_id: int) -> EventSeries:
+        now = _iso(datetime.now(UTC))
+        connection = self.db._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                """
+                UPDATE event_series
+                SET status = ?, sync_state = ?, updated_at = ?
+                WHERE id = ? AND created_by = ? AND status = ? AND google_series_id IS NULL
+                """,
+                (SERIES_CREATING, SYNCED, now, series_id, admin_id, SERIES_FAILED),
+            )
+            if cursor.rowcount != 1:
+                raise RequestNotEditableError("failed series draft not found")
+            connection.execute(
+                """
+                UPDATE event_occurrences SET status = ?, updated_at = ?
+                WHERE series_id = ? AND status = ?
+                """,
+                (OCCURRENCE_SCHEDULED, now, series_id, OCCURRENCE_CANCELLED),
+            )
+            self.db._audit(connection, admin_id, "series_create_retried", "event_series", str(series_id), {})
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        result = self.get_series(series_id)
+        if result is None:
+            raise RuntimeError("retried series draft not found")
+        return result
+
     def get_series(self, series_id: int) -> EventSeries | None:
         with self.db._connect() as connection:
             row = connection.execute("SELECT * FROM event_series WHERE id = ?", (series_id,)).fetchone()

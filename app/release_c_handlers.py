@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 from dataclasses import replace
@@ -21,6 +22,9 @@ from app.models import (
     OCCURRENCE_CANCELLED,
     OCCURRENCE_MISSING,
     SERIES_DAILY,
+    SERIES_ACTIVE,
+    SERIES_CREATING,
+    SERIES_FAILED,
     SERIES_MONTHLY,
     SERIES_WEEKLY,
     EventOccurrence,
@@ -129,7 +133,15 @@ def create_release_c_router(
         cursor = first
         while cursor < last:
             boundary = min(cursor + timedelta(days=30), last)
-            busy = await calendar.busy(cursor, boundary)
+            for attempt in range(2):
+                try:
+                    busy = await calendar.busy(cursor, boundary)
+                    break
+                except CalendarUnavailable:
+                    if attempt:
+                        raise
+                    LOGGER.warning("calendar_busy_retry")
+                    await asyncio.sleep(1)
             for item_start, item_end in occurrences:
                 if item_start >= boundary or item_end <= cursor:
                     continue
@@ -438,6 +450,9 @@ def create_release_c_router(
             )
 
     async def create_series_from_state(callback: CallbackQuery, state: FSMContext, allow_overlap: bool) -> None:
+        await callback.answer("Проверяю календарь…")
+        if callback.message:
+            await callback.message.answer("⏳ Проверяю календарь и создаю серию. Это может занять до минуты…")
         data = await state.get_data()
         try:
             start = datetime.combine(date.fromisoformat(str(data["start_date"])), _clock(str(data["start_time"])), zone)
@@ -445,20 +460,25 @@ def create_release_c_router(
             until = date.fromisoformat(str(data["until_date"]))
             occurrences = generate_occurrences(start, end, str(data["frequency"]), until)
         except (KeyError, TypeError, ValueError):
-            await callback.answer("Черновик устарел. Начните создание заново.", show_alert=True)
+            if callback.message:
+                await callback.message.answer("Черновик устарел. Начните создание заново.", reply_markup=home_keyboard())
             await state.clear()
             return
         if start <= datetime.now(zone):
-            await callback.answer("Первая встреча уже в прошлом. Начните создание заново.", show_alert=True)
+            if callback.message:
+                await callback.message.answer("Первая встреча уже в прошлом. Начните создание заново.", reply_markup=home_keyboard())
             return
         try:
             conflict = bool(data.get("blocks_calendar")) and await has_conflict(occurrences)
         except CalendarUnavailable:
             LOGGER.exception("series_conflict_check_failed")
-            await callback.answer("Google Календарь временно недоступен. Серия не создана.", show_alert=True)
+            if callback.message:
+                await callback.message.answer(
+                    "Google Календарь временно не ответил. Серия не создана — можно повторить этой же кнопкой.",
+                    reply_markup=home_keyboard(),
+                )
             return
         if conflict and not allow_overlap:
-            await callback.answer()
             if callback.message:
                 await callback.message.answer(
                     "В серии есть время, уже занятое в календаре. Создать её с пересечениями?",
@@ -473,45 +493,74 @@ def create_release_c_router(
         user = callback.from_user
         draft: EventSeries | None = None
         google_id: str | None = None
+        series: EventSeries | None = None
         try:
-            draft = automation.create_series_draft(
-                admin_id=user.id,
-                admin_name=user.full_name,
-                admin_username=user.username,
-                email=data.get("email"),
-                subject=str(data["subject"]),
-                description=data.get("description"),
-                location=data.get("location"),
-                start_at=start,
-                end_at=end,
-                frequency=str(data["frequency"]),
-                until_date=until.isoformat(),
-                blocks_calendar=bool(data.get("blocks_calendar")),
-                allow_overlap=allow_overlap,
-                occurrences=occurrences,
-            )
-            google_id = await calendar.create_series(draft)
-            series = automation.activate_series(draft.id, google_id, user.id)
-            await schedule_series_reminders(series.id)
+            draft_id = int(data.get("series_draft_id", 0))
+            draft = automation.get_series(draft_id) if draft_id else None
+            if draft and draft.created_by == user.id and draft.status == SERIES_ACTIVE:
+                series = draft
+            elif draft and draft.created_by == user.id and draft.status == SERIES_FAILED:
+                draft = automation.retry_series_draft(draft.id, user.id)
+            elif draft is None or draft.created_by != user.id or draft.status != SERIES_CREATING:
+                draft = automation.create_series_draft(
+                    admin_id=user.id,
+                    admin_name=user.full_name,
+                    admin_username=user.username,
+                    email=data.get("email"),
+                    subject=str(data["subject"]),
+                    description=data.get("description"),
+                    location=data.get("location"),
+                    start_at=start,
+                    end_at=end,
+                    frequency=str(data["frequency"]),
+                    until_date=until.isoformat(),
+                    blocks_calendar=bool(data.get("blocks_calendar")),
+                    allow_overlap=allow_overlap,
+                    occurrences=occurrences,
+                )
+                await state.update_data(series_draft_id=draft.id)
+            if series is None:
+                for attempt in range(2):
+                    try:
+                        google_id = await calendar.create_series(draft)
+                        break
+                    except CalendarUnavailable:
+                        if attempt:
+                            raise
+                        LOGGER.warning("series_create_retry", extra={"series_id": draft.id})
+                        await asyncio.sleep(2)
+                if not google_id:
+                    raise CalendarUnavailable("series create returned no ID")
+                series = automation.activate_series(draft.id, google_id, user.id)
         except SlotConflictError:
-            await callback.answer("Пока вы заполняли форму, время заняли. Проверьте серию ещё раз.", show_alert=True)
+            if callback.message:
+                await callback.message.answer("Пока вы заполняли форму, время заняли. Проверьте серию ещё раз.")
             return
         except Exception as exc:
             LOGGER.exception("series_create_failed")
             if draft:
                 automation.fail_series(draft.id, type(exc).__name__)
-            if google_id:
+            if google_id and series is None:
                 try:
                     await calendar.delete_series(google_id)
                 except Exception:
                     LOGGER.exception("series_create_rollback_failed")
-            await callback.answer("Не удалось создать серию. Данные сохранены в журнале, попробуйте позже.", show_alert=True)
+            if callback.message:
+                await callback.message.answer(
+                    "Google Календарь не подтвердил операцию. Нажмите «Создать серию» ещё раз: повтор не создаст дубликат.",
+                    reply_markup=home_keyboard(),
+                )
             return
+        try:
+            await schedule_series_reminders(series.id)
+        except Exception:
+            LOGGER.exception("series_reminders_schedule_failed", extra={"series_id": series.id})
         await state.clear()
-        await callback.answer("Серия создана")
         if callback.message:
             await callback.message.answer(
-                _series_text(series, zone) + f"\nСоздано встреч: {len(occurrences)}.",
+                "✅ <b>Серия успешно создана</b>\n\n"
+                + _series_text(series, zone)
+                + f"\nСоздано встреч: {len(occurrences)}.",
                 reply_markup=home_keyboard(),
             )
 
@@ -702,10 +751,18 @@ def create_release_c_router(
             await callback.answer("Встреча больше недоступна", show_alert=True)
             await state.clear()
             return
+        await callback.answer("Переношу встречу…")
         start = datetime.fromisoformat(str(data["move_start"]))
         end = datetime.fromisoformat(str(data["move_end"]))
         try:
-            google_id = await calendar.update_occurrence(series.google_series_id, occurrence, start, end)
+            try:
+                google_id = await calendar.update_occurrence(series.google_series_id, occurrence, start, end)
+            except CalendarUnavailable:
+                LOGGER.warning("occurrence_move_verifying_after_timeout", extra={"occurrence_id": occurrence.id})
+                remote_state = await calendar.occurrence_state(series.google_series_id, occurrence)
+                if not remote_state.exists or remote_state.start_at != start.astimezone(UTC) or remote_state.end_at != end.astimezone(UTC):
+                    raise
+                google_id = remote_state.event_id
             moved = automation.move_occurrence(occurrence.id, callback.from_user.id, start, end)
             rules = load_notification_rules(db, settings)
             if rules.automation_enabled:
@@ -713,12 +770,12 @@ def create_release_c_router(
             LOGGER.info("occurrence_moved", extra={"occurrence_id": moved.id, "google_event_id": google_id})
         except Exception:
             LOGGER.exception("occurrence_move_failed")
-            await callback.answer("Не удалось перенести встречу. Подробности сохранены в журнале.", show_alert=True)
+            if callback.message:
+                await callback.message.answer("Не удалось перенести встречу. Попробуйте ещё раз позже.", reply_markup=home_keyboard())
             return
         await state.clear()
-        await callback.answer("Встреча перенесена")
         if callback.message:
-            await callback.message.answer(_occurrence_text(moved, series, zone), reply_markup=home_keyboard())
+            await callback.message.answer("✅ Встреча перенесена\n\n" + _occurrence_text(moved, series, zone), reply_markup=home_keyboard())
 
     @router.callback_query(F.data.startswith("c:occ:cancel:") & ~F.data.contains(":confirm:"))
     async def occurrence_cancel(callback: CallbackQuery) -> None:
@@ -747,16 +804,23 @@ def create_release_c_router(
         if occurrence is None or series is None or not series.google_series_id:
             await callback.answer("Встреча больше недоступна", show_alert=True)
             return
+        await callback.answer("Отменяю встречу…")
         try:
-            await calendar.delete_occurrence(series.google_series_id, occurrence)
+            try:
+                await calendar.delete_occurrence(series.google_series_id, occurrence)
+            except CalendarUnavailable:
+                LOGGER.warning("occurrence_cancel_verifying_after_timeout", extra={"occurrence_id": occurrence.id})
+                remote_state = await calendar.occurrence_state(series.google_series_id, occurrence)
+                if remote_state.exists:
+                    raise
             automation.cancel_occurrence(occurrence.id, callback.from_user.id)
         except Exception:
             LOGGER.exception("occurrence_cancel_failed")
-            await callback.answer("Не удалось отменить встречу. Подробности сохранены в журнале.", show_alert=True)
+            if callback.message:
+                await callback.message.answer("Не удалось отменить встречу. Попробуйте ещё раз позже.", reply_markup=home_keyboard())
             return
-        await callback.answer("Встреча отменена")
         if callback.message:
-            await callback.message.answer("Эта встреча отменена. Остальная серия сохранена.", reply_markup=home_keyboard())
+            await callback.message.answer("✅ Эта встреча отменена. Остальная серия сохранена.", reply_markup=home_keyboard())
 
     @router.callback_query(F.data.startswith("c:series:cancel:") & ~F.data.contains(":confirm:"))
     async def series_cancel(callback: CallbackQuery) -> None:
@@ -784,16 +848,22 @@ def create_release_c_router(
         if series is None or not series.google_series_id:
             await callback.answer("Серия больше недоступна", show_alert=True)
             return
+        await callback.answer("Отменяю серию…")
         try:
-            await calendar.delete_series(series.google_series_id)
+            try:
+                await calendar.delete_series(series.google_series_id)
+            except CalendarUnavailable:
+                LOGGER.warning("series_cancel_retry", extra={"series_id": series.id})
+                await asyncio.sleep(1)
+                await calendar.delete_series(series.google_series_id)
             automation.cancel_series(series.id, callback.from_user.id)
         except Exception:
             LOGGER.exception("series_cancel_failed")
-            await callback.answer("Не удалось отменить серию. Подробности сохранены в журнале.", show_alert=True)
+            if callback.message:
+                await callback.message.answer("Не удалось отменить серию. Попробуйте ещё раз позже.", reply_markup=home_keyboard())
             return
-        await callback.answer("Серия отменена")
         if callback.message:
-            await callback.message.answer("Серия и её будущие встречи отменены.", reply_markup=home_keyboard())
+            await callback.message.answer("✅ Серия и её будущие встречи отменены.", reply_markup=home_keyboard())
 
     @router.callback_query(F.data.startswith("c:series:time:") & (F.data != "c:series:time:apply"))
     async def series_time_start(callback: CallbackQuery, state: FSMContext) -> None:
@@ -871,22 +941,34 @@ def create_release_c_router(
             await callback.answer("Серия больше недоступна", show_alert=True)
             await state.clear()
             return
+        await callback.answer("Изменяю серию…")
         start = datetime.fromisoformat(str(data["series_start"]))
         end = datetime.fromisoformat(str(data["series_end"]))
         occurrences = generate_occurrences(start, end, series.frequency, date.fromisoformat(series.until_date))
         updated_for_google = replace(series, start_at=start, end_at=end)
         try:
-            await calendar.update_series(updated_for_google)
+            for attempt in range(2):
+                try:
+                    await calendar.update_series(updated_for_google)
+                    break
+                except CalendarUnavailable:
+                    if attempt:
+                        raise
+                    LOGGER.warning("series_retime_retry", extra={"series_id": series.id})
+                    await asyncio.sleep(1)
             updated = automation.retime_series(series.id, callback.from_user.id, start, end, occurrences)
             await schedule_series_reminders(updated.id)
         except Exception:
             LOGGER.exception("series_retime_failed")
-            await callback.answer("Не удалось изменить серию. Подробности сохранены в журнале.", show_alert=True)
+            if callback.message:
+                await callback.message.answer(
+                    "Google Календарь не подтвердил изменение. Повторите операцию позже; повтор не создаёт новую серию.",
+                    reply_markup=home_keyboard(),
+                )
             return
         await state.clear()
-        await callback.answer("Время серии изменено")
         if callback.message:
-            await callback.message.answer(_series_text(updated, zone), reply_markup=home_keyboard())
+            await callback.message.answer("✅ Время всей серии изменено\n\n" + _series_text(updated, zone), reply_markup=home_keyboard())
 
     @router.callback_query(F.data == "c:notify")
     async def notification_settings(callback: CallbackQuery, state: FSMContext) -> None:

@@ -17,7 +17,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 class AppsScriptCalendar:
-    def __init__(self, url: str, secret_file: Path, timeout_seconds: int = 20) -> None:
+    def __init__(self, url: str, secret_file: Path, timeout_seconds: int = 45) -> None:
         if not url.startswith("https://script.google.com/") or not url.endswith("/exec"):
             raise RuntimeError("Invalid Google Apps Script deployment URL")
         self.url = url

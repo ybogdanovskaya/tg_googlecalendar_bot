@@ -10,6 +10,13 @@ from app.models import EventOccurrence, EventSeries, MeetingRequest
 
 
 class AppsScriptCalendarTests(unittest.IsolatedAsyncioTestCase):
+    def test_default_timeout_allows_apps_script_cold_start(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            secret_file = Path(temporary) / "secret"
+            secret_file.write_text("test-secret", encoding="utf-8")
+            client = AppsScriptCalendar("https://script.google.com/macros/s/example/exec", secret_file)
+            self.assertEqual(client.timeout_seconds, 45)
+
     async def test_busy_response_is_parsed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             secret_file = Path(temporary) / "secret"

@@ -80,6 +80,18 @@ class AutomationStoreTests(unittest.TestCase):
         self.assertEqual(len(self.store.list_occurrences(active.id)), 3)
         self.assertEqual(len(self.db.active_intervals(start, start + timedelta(minutes=30))), 2)
 
+    def test_failed_series_can_be_retried_with_the_same_id(self) -> None:
+        start = datetime.now(UTC) + timedelta(days=3)
+        draft = self.store.create_series_draft(**self.series_values(start))
+        self.store.fail_series(draft.id, "timeout")
+        failed = self.store.get_series(draft.id)
+        self.assertEqual(failed.status, "FAILED")
+        retried = self.store.retry_series_draft(draft.id, 1)
+        self.assertEqual(retried.id, draft.id)
+        self.assertEqual(retried.status, "CREATING")
+        active = self.store.activate_series(retried.id, "series-id", 1)
+        self.assertEqual(active.status, SERIES_ACTIVE)
+
     def test_occurrence_can_be_moved_and_cancelled_once(self) -> None:
         start = datetime(2026, 8, 21, 9, 0, tzinfo=UTC)
         draft = self.store.create_series_draft(**self.series_values(start))
