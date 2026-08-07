@@ -107,6 +107,7 @@ def main() -> None:
                 "action": "occurrenceUpdate",
                 "eventId": series_id,
                 "lookupStart": shifted.isoformat(),
+                "expectedStart": shifted.isoformat(),
                 "start": moved.isoformat(),
                 "end": (moved + timedelta(minutes=15)).isoformat(),
             }

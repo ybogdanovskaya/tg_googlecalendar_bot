@@ -286,6 +286,9 @@ function updateOccurrence_(payload) {
   const start = parseDate_(payload.start);
   const end = parseDate_(payload.end);
   validateRange_(start, end);
+  if (payload.expectedStart) {
+    event.setTag('telegram_occurrence_expected', parseDate_(payload.expectedStart).toISOString());
+  }
   event.setTime(start, end);
   return event.getId();
 }
@@ -308,22 +311,20 @@ function getOccurrenceStatus_(payload) {
 }
 
 function findOccurrenceForStatus_(payload) {
+  const expected = parseDate_(payload.expectedStart);
+  const expectedTag = expected.toISOString();
   const current = findOccurrence_(payload);
   if (current) {
+    current.setTag('telegram_occurrence_expected', expectedTag);
     return current;
   }
   requireText_(payload.eventId, 'event_id_required', 300);
-  const expected = parseDate_(payload.expectedStart);
   const margin = 31 * 24 * 60 * 60 * 1000;
-  const originalMargin = 2 * 60 * 1000;
   return CalendarApp.getDefaultCalendar()
     .getEvents(new Date(expected.getTime() - margin), new Date(expected.getTime() + margin))
     .find(function(event) {
-      if (event.getId() !== String(payload.eventId)) {
-        return false;
-      }
-      const original = event.getOriginalStartTime();
-      return original && Math.abs(original.getTime() - expected.getTime()) < originalMargin;
+      return event.getId() === String(payload.eventId)
+        && event.getTag('telegram_occurrence_expected') === expectedTag;
     }) || null;
 }
 

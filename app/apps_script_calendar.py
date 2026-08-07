@@ -191,6 +191,7 @@ class AppsScriptCalendar:
                 "action": "occurrenceUpdate",
                 "eventId": series_id,
                 "lookupStart": occurrence.actual_start_at.astimezone(UTC).isoformat(),
+                "expectedStart": occurrence.expected_start_at.astimezone(UTC).isoformat(),
                 "start": start_at.astimezone(UTC).isoformat(),
                 "end": end_at.astimezone(UTC).isoformat(),
             },

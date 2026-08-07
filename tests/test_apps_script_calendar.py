@@ -122,6 +122,7 @@ class AppsScriptCalendarTests(unittest.IsolatedAsyncioTestCase):
                 await client.update_occurrence("series-id", occurrence, now + timedelta(hours=1), now + timedelta(hours=1, minutes=30)),
                 "series-id",
             )
+            self.assertEqual(captured[-1]["expectedStart"], now.isoformat())
             occurrence_state = await client.occurrence_state("series-id", occurrence)
             self.assertTrue(occurrence_state.exists)
             self.assertTrue(await client.delete_occurrence("series-id", occurrence))
