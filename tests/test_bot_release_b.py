@@ -72,8 +72,8 @@ class ReleaseBBotTests(unittest.TestCase):
                     chat_instance="chat",
                     data=data,
                 )
-                result = await handlers[handler_name].check(event)
-                return bool(result)
+                matched, _ = await handlers[handler_name].check(event)
+                return bool(matched)
 
             self.assertTrue(asyncio.run(matches("ask_cancel", "b:cancel:42")))
             self.assertFalse(asyncio.run(matches("ask_cancel", "b:cancel:confirm:42")))
