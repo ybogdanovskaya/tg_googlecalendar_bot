@@ -332,7 +332,7 @@ def create_release_b_router(settings: Settings, db: Database, calendar: Calendar
             await callback.message.edit_text("Предложенные варианты отклонены.", reply_markup=home_keyboard())
         await bot.send_message(settings.admin_telegram_id, f"Пользователь отклонил альтернативы для заявки №{request_id}.")
 
-    @router.callback_query(F.data.regexp(r"^b:cancel:\d+$"))
+    @router.callback_query(F.data.startswith("b:cancel:") & ~F.data.startswith("b:cancel:confirm:"))
     async def ask_cancel(callback: CallbackQuery) -> None:
         request_id = int(callback.data.rsplit(":", 1)[1])
         await callback.answer()
@@ -355,7 +355,7 @@ def create_release_b_router(settings: Settings, db: Database, calendar: Calendar
         if callback.message:
             await callback.message.edit_text("Запрос на отмену отправлен. Встреча пока остаётся в календаре.", reply_markup=home_keyboard())
 
-    @router.callback_query(F.data.regexp(r"^b:move:\d+$"))
+    @router.callback_query(F.data.startswith("b:move:") & ~F.data.startswith("b:move:dur:"))
     async def move_start(callback: CallbackQuery) -> None:
         request_id = int(callback.data.rsplit(":", 1)[1])
         durations = load_rules(db, settings).durations
