@@ -148,7 +148,7 @@ def create_release_d_router(settings: Settings, db: Database, calendar: Calendar
             return
         action = (
             "будут отменены в Google Calendar"
-            if mode == DELETE_CANCEL_FUTURE
+            if request.mode == DELETE_CANCEL_FUTURE
             else "останутся в Google Calendar; до их окончания сохранится только минимум данных"
         )
         await callback.answer()
@@ -160,7 +160,7 @@ def create_release_d_router(settings: Settings, db: Database, calendar: Calendar
                 reply_markup=_keyboard(
                     [
                         [InlineKeyboardButton(text="Продолжить", callback_data=f"d:data:confirm:{request.id}")],
-                        [InlineKeyboardButton(text="Не удалять", callback_data="home")],
+                        [InlineKeyboardButton(text="Не удалять", callback_data=f"d:data:abort:{request.id}")],
                     ]
                 ),
             )
@@ -184,10 +184,18 @@ def create_release_d_router(settings: Settings, db: Database, calendar: Calendar
                 reply_markup=_keyboard(
                     [
                         [InlineKeyboardButton(text=consequence, callback_data=f"d:data:execute:{request.id}")],
-                        [InlineKeyboardButton(text="Не удалять", callback_data="home")],
+                        [InlineKeyboardButton(text="Не удалять", callback_data=f"d:data:abort:{request.id}")],
                     ]
                 ),
             )
+
+    @router.callback_query(F.data.startswith("d:data:abort:"))
+    async def deletion_abort(callback: CallbackQuery) -> None:
+        request_id = int(callback.data.rsplit(":", 1)[1])
+        cancelled = await asyncio.to_thread(store.cancel_deletion_request, request_id, callback.from_user.id)
+        await callback.answer("Запрос отменён" if cancelled else "Запрос уже обработан")
+        if callback.message:
+            await callback.message.answer("Удаление данных отменено.", reply_markup=home_keyboard())
 
     @router.callback_query(F.data.startswith("d:data:execute:"))
     async def deletion_execute(callback: CallbackQuery) -> None:

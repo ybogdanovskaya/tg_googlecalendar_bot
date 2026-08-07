@@ -15,6 +15,7 @@ DELETE_PROCESSING = "PROCESSING"
 DELETE_WAITING = "WAITING"
 DELETE_COMPLETED = "COMPLETED"
 DELETE_FAILED = "FAILED"
+DELETE_CANCELLED = "CANCELLED"
 
 
 @dataclass(frozen=True)
@@ -154,6 +155,16 @@ class ReleaseDStore:
         with self.db._connect() as connection:
             row = connection.execute("SELECT * FROM deletion_requests WHERE id = ?", (request_id,)).fetchone()
         return self._row(row) if row else None
+
+    def cancel_deletion_request(self, request_id: int, telegram_id: int) -> bool:
+        with self.db._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE deletion_requests SET status = ? WHERE id = ? AND telegram_id = ? AND status = ?",
+                (DELETE_CANCELLED, request_id, telegram_id, DELETE_REQUESTED),
+            )
+            if cursor.rowcount:
+                self.db._audit(connection, telegram_id, "deletion_cancelled", "deletion_request", str(request_id), {})
+            return cursor.rowcount == 1
 
     def future_google_events(self, request: DeletionRequest) -> list[tuple[int, str]]:
         if request.telegram_id is None:

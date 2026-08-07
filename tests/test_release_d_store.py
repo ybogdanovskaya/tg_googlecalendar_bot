@@ -83,6 +83,14 @@ class ReleaseDStoreTests(unittest.TestCase):
         self.assertEqual(anonymized.email, "deleted@example.invalid")
         self.assertEqual(self.store.get_deletion_request(deletion.id).status, DELETE_COMPLETED)
 
+    def test_deletion_can_be_aborted_before_final_confirmation(self) -> None:
+        first = self.store.create_deletion_request(100, DELETE_CANCEL_FUTURE)
+        self.assertTrue(self.store.cancel_deletion_request(first.id, 100))
+        self.assertFalse(self.store.cancel_deletion_request(first.id, 100))
+        second = self.store.create_deletion_request(100, DELETE_KEEP_FUTURE)
+        self.assertNotEqual(first.id, second.id)
+        self.assertEqual(second.mode, DELETE_KEEP_FUTURE)
+
 
 if __name__ == "__main__":
     unittest.main()
