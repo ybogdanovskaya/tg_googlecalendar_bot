@@ -16,7 +16,7 @@ from app.apps_script_calendar import AppsScriptCalendar
 def verify_sqlite(path: Path) -> None:
     if not path.exists():
         raise RuntimeError("database_missing")
-    with sqlite3.connect(path) as connection:
+    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
         result = connection.execute("PRAGMA quick_check").fetchone()
     if not result or str(result[0]).lower() != "ok":
         raise RuntimeError("database_check_failed")
