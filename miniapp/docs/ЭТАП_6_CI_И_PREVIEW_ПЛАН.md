@@ -1,6 +1,6 @@
 # Этап 6 — CI и изолированный HTTPS preview
 
-Статус: подготовка. Production, `main`, VPS и GitHub Environment не менялись.
+Статус: подзадача 6.1 завершена 8 августа 2026 года; production, `main`, VPS и GitHub Environment не менялись.
 
 ## Что обнаружено
 
@@ -44,11 +44,13 @@
 
 ## Критерии приёмки подзадачи 6.1
 
-- [x] В workflow добавлена независимая задача Mini App checks; её запуск в GitHub Actions проверяется после отправки commit в `dev`.
+- [x] В `dev` успешно выполнены Python checks и независимые Mini App checks: [run 31279726442](https://github.com/ybogdanovskaya/tg_googlecalendar_bot/actions/runs/31279726442).
 - [x] Mini App checks используют lockfile и не публикуют secrets.
-- [ ] `npm test` и `npm run build` проходят на чистом GitHub-hosted runner.
-- [ ] Сбой frontend-проверки делает CI красным, но не запускает deploy.
+- [x] `npm test` и `npm run build` успешно прошли на чистом GitHub-hosted runner.
+- [x] Frontend-проверка — обычная обязательная CI-job: ненулевой код её шага делает CI красным; в workflow нет шага deploy, а проверенный запуск содержал только Python checks и Mini App checks.
 - [x] Ничего не передаётся на VPS, GitHub Environment и `main` не меняются.
+
+Подзадача 6.1 завершена. HTTPS preview из подзадачи 6.2 не начат: для него требуется отдельное решение о тестовом домене, тестовом Telegram-боте и изолированной server-конфигурации.
 
 ## Что нужно подтвердить владельцу
 
