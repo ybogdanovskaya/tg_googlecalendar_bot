@@ -56,7 +56,10 @@ restore_previous_release() {
 
 trap cleanup EXIT
 
-dd if=/dev/stdin of="${ARCHIVE}" bs=1M count=21 status=none
+if ! timeout 60s dd if=/dev/stdin of="${ARCHIVE}" bs=1M count=21 status=none; then
+    echo "deploy_failed reason=archive_read_timeout"
+    exit 1
+fi
 ARCHIVE_SIZE="$(stat -c %s "${ARCHIVE}")"
 if (( ARCHIVE_SIZE == 0 || ARCHIVE_SIZE > MAX_ARCHIVE_BYTES )); then
     echo "deploy_failed reason=invalid_archive_size bytes=${ARCHIVE_SIZE}"
