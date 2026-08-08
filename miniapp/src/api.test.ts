@@ -23,4 +23,25 @@ describe("CalendarApi", () => {
       body: JSON.stringify({ init_data: "telegram-signed-data" })
     }));
   });
+
+  it("protects administrative mutations with the server session CSRF token", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        user: { display_name: "Администратор", role: "ADMIN", consent: { accepted: true, version: "test" } },
+        csrf_token: "csrf-token",
+        expires_at: "2026-08-08T12:30:00+03:00"
+      }), { status: 200, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "1", status: "APPROVED" }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const api = new CalendarApi();
+    await api.authenticate("telegram-signed-data");
+    await api.approveAdminRequest("1");
+
+    expect(fetchMock).toHaveBeenLastCalledWith("/api/v1/admin/requests/1/approve", expect.objectContaining({
+      method: "POST",
+      credentials: "same-origin",
+      headers: expect.objectContaining({ "X-CSRF-Token": "csrf-token", "Idempotency-Key": expect.any(String) })
+    }));
+  });
 });

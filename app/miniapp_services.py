@@ -5,7 +5,7 @@ import hashlib
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -14,8 +14,9 @@ from app.automation_store import AutomationStore
 from app.calendar_client import CalendarClient, CalendarUnavailable
 from app.config import Settings
 from app.db import Database, IdempotencyConflictError, RequestNotEditableError, SlotConflictError
-from app.models import CHANGE_CANCEL, CHANGE_RESCHEDULE, ChangeRequest, MeetingRequest, RequestAlternative
+from app.models import CHANGE_CANCEL, CHANGE_RESCHEDULE, EventOccurrence, EventSeries, ChangeRequest, MeetingRequest, RequestAlternative
 from app.notification_rules import load_notification_rules
+from app.recurrence import generate_occurrences
 from app.release_d_store import (
     DELETE_CANCEL_FUTURE,
     DELETE_COMPLETED,
@@ -211,6 +212,341 @@ class MiniAppBookingService:
         except Exception:
             LOGGER.exception("miniapp_cancelled_request_jobs_cleanup_failed", extra={"request_id": request_id})
         return True
+
+    async def admin_approve_request(self, request_id: int, admin_id: int) -> MeetingRequest:
+        request = await asyncio.to_thread(self.database.claim_for_approval, request_id, admin_id)
+        if request is None:
+            raise RequestNotEditableError("request is unavailable")
+        try:
+            if not await self.calendar.is_free(request.start_at, request.end_at):
+                await asyncio.to_thread(self.database.reset_approval, request_id, "google_slot_busy")
+                raise SlotConflictError("google calendar slot is busy")
+            event_id = await self.calendar.create_event(request)
+            approved = await asyncio.to_thread(self.database.complete_approval, request_id, admin_id, event_id)
+            try:
+                notification_rules = await asyncio.to_thread(load_notification_rules, self.database, self.settings)
+                await asyncio.to_thread(
+                    self.automation.rebuild_request_reminders,
+                    approved.id,
+                    self.settings.admin_telegram_id,
+                    notification_rules.reminder_minutes,
+                )
+            except Exception:
+                LOGGER.exception("miniapp_approval_reminder_schedule_failed", extra={"request_id": approved.id})
+            return approved
+        except SlotConflictError:
+            raise
+        except Exception as exc:
+            await asyncio.to_thread(self.database.reset_approval, request_id, type(exc).__name__)
+            raise CalendarUnavailable("calendar approval failed") from exc
+
+    async def admin_reject_request(self, request_id: int, admin_id: int) -> MeetingRequest:
+        request = await asyncio.to_thread(self.database.reject, request_id, admin_id)
+        if request is None:
+            raise RequestNotEditableError("request is unavailable")
+        try:
+            await asyncio.to_thread(self.automation.cancel_request_jobs, request.id)
+        except Exception:
+            LOGGER.exception("miniapp_rejected_request_jobs_cleanup_failed", extra={"request_id": request.id})
+        return request
+
+    async def admin_create_alternative(
+        self,
+        request_id: int,
+        admin_id: int,
+        start_at: datetime,
+        duration_minutes: int,
+    ) -> RequestAlternative:
+        if start_at.tzinfo is None or not 1 <= duration_minutes <= 480:
+            raise BookingValidationError("alternative time is invalid")
+        start_utc = start_at.astimezone(UTC)
+        end_utc = start_utc + timedelta(minutes=duration_minutes)
+        if not await self.calendar.is_free(start_utc, end_utc):
+            raise SlotConflictError("google calendar slot is busy")
+        try:
+            return await asyncio.to_thread(
+                self.database.create_alternative,
+                request_id,
+                admin_id,
+                start_utc,
+                end_utc,
+                self.rules().hold_hours,
+            )
+        except ValueError as exc:
+            raise RequestNotEditableError("alternative limit reached") from exc
+
+    async def admin_create_manual_meeting(
+        self,
+        *,
+        admin_id: int,
+        subject: str,
+        email: str | None,
+        description: str | None,
+        location: str | None,
+        start_at: datetime,
+        duration_minutes: int,
+        blocks_calendar: bool,
+        allow_overlap: bool,
+    ) -> MeetingRequest:
+        if start_at.tzinfo is None or not 1 <= duration_minutes <= 480 or not subject.strip():
+            raise BookingValidationError("manual meeting is invalid")
+        start_utc = start_at.astimezone(UTC)
+        end_utc = start_utc + timedelta(minutes=duration_minutes)
+        if start_utc <= datetime.now(UTC):
+            raise BookingValidationError("manual meeting must be in future")
+        draft = await asyncio.to_thread(
+            self.database.create_admin_draft,
+            admin_id=admin_id,
+            admin_name="Администратор",
+            admin_username=None,
+            email=email.strip() if email and email.strip() else None,
+            subject=subject.strip(),
+            description=description.strip() if description and description.strip() else None,
+            location=location.strip() if location and location.strip() else None,
+            start_at=start_utc,
+            end_at=end_utc,
+            blocks_calendar=blocks_calendar,
+            allow_overlap=allow_overlap,
+        )
+        try:
+            event_id = await self.calendar.create_event(draft)
+            created = await asyncio.to_thread(self.database.complete_approval, draft.id, admin_id, event_id)
+            try:
+                notification_rules = await asyncio.to_thread(load_notification_rules, self.database, self.settings)
+                await asyncio.to_thread(
+                    self.automation.rebuild_request_reminders,
+                    created.id,
+                    self.settings.admin_telegram_id,
+                    notification_rules.reminder_minutes,
+                )
+            except Exception:
+                LOGGER.exception("miniapp_manual_meeting_reminders_failed", extra={"request_id": created.id})
+            return created
+        except SlotConflictError:
+            await asyncio.to_thread(self.database.fail_admin_draft, draft.id, "slot_conflict")
+            raise
+        except Exception as exc:
+            await asyncio.to_thread(self.database.fail_admin_draft, draft.id, type(exc).__name__)
+            raise CalendarUnavailable("manual meeting creation failed") from exc
+
+    async def admin_cancel_manual_meeting(self, request_id: int, admin_id: int) -> MeetingRequest:
+        request = await asyncio.to_thread(self.database.get_request, request_id)
+        if (
+            request is None
+            or request.telegram_id != admin_id
+            or request.source != "ADMIN"
+            or not request.google_event_id
+        ):
+            raise RequestNotEditableError("manual meeting is unavailable")
+        try:
+            await self.calendar.delete_event(request.google_event_id)
+        except Exception as exc:
+            raise CalendarUnavailable("manual meeting cancellation failed") from exc
+        cancelled = await asyncio.to_thread(self.database.cancel_admin_meeting, request_id, admin_id)
+        if cancelled is None:
+            raise RequestNotEditableError("manual meeting is unavailable")
+        try:
+            await asyncio.to_thread(self.automation.cancel_request_jobs, request_id)
+        except Exception:
+            LOGGER.exception("miniapp_manual_meeting_jobs_cleanup_failed", extra={"request_id": request_id})
+        return cancelled
+
+    async def admin_update_manual_meeting(
+        self,
+        request_id: int,
+        admin_id: int,
+        changes: dict[str, str | None],
+    ) -> MeetingRequest:
+        request = await asyncio.to_thread(self.database.get_request, request_id)
+        if (
+            request is None
+            or request.telegram_id != admin_id
+            or request.source != "ADMIN"
+            or not request.google_event_id
+        ):
+            raise RequestNotEditableError("manual meeting is unavailable")
+        updated_remote = replace(request, **changes)
+        try:
+            await self.calendar.update_event(updated_remote)
+            return await asyncio.to_thread(self.database.update_admin_meeting_details, request_id, admin_id, changes)
+        except RequestNotEditableError:
+            raise
+        except Exception as exc:
+            raise CalendarUnavailable("manual meeting update failed") from exc
+
+    async def admin_create_series(
+        self,
+        *,
+        admin_id: int,
+        subject: str,
+        email: str | None,
+        description: str | None,
+        location: str | None,
+        start_at: datetime,
+        duration_minutes: int,
+        frequency: str,
+        until_date: date,
+        blocks_calendar: bool,
+        allow_overlap: bool,
+    ) -> EventSeries:
+        if start_at.tzinfo is None or not 1 <= duration_minutes <= 480 or not subject.strip():
+            raise BookingValidationError("series is invalid")
+        start_utc = start_at.astimezone(UTC)
+        if start_utc <= datetime.now(UTC):
+            raise BookingValidationError("series must start in future")
+        end_utc = start_utc + timedelta(minutes=duration_minutes)
+        try:
+            occurrences = generate_occurrences(start_utc, end_utc, frequency, until_date)
+        except ValueError as exc:
+            raise BookingValidationError("series recurrence is invalid") from exc
+        draft = await asyncio.to_thread(
+            self.automation.create_series_draft,
+            admin_id=admin_id,
+            admin_name="Администратор",
+            admin_username=None,
+            email=email.strip() if email and email.strip() else None,
+            subject=subject.strip(),
+            description=description.strip() if description and description.strip() else None,
+            location=location.strip() if location and location.strip() else None,
+            start_at=start_utc,
+            end_at=end_utc,
+            frequency=frequency,
+            until_date=until_date.isoformat(),
+            blocks_calendar=blocks_calendar,
+            allow_overlap=allow_overlap,
+            occurrences=occurrences,
+        )
+        google_id: str | None = None
+        try:
+            google_id = await self.calendar.create_series(draft)
+            return await asyncio.to_thread(self.automation.activate_series, draft.id, google_id, admin_id)
+        except SlotConflictError:
+            await asyncio.to_thread(self.automation.fail_series, draft.id, "slot_conflict")
+            raise
+        except Exception as exc:
+            await asyncio.to_thread(self.automation.fail_series, draft.id, type(exc).__name__)
+            if google_id:
+                try:
+                    await self.calendar.delete_series(google_id)
+                except Exception:
+                    LOGGER.exception("miniapp_series_create_rollback_failed", extra={"series_id": draft.id})
+            raise CalendarUnavailable("series creation failed") from exc
+
+    async def admin_cancel_series(self, series_id: int, admin_id: int) -> EventSeries:
+        series = await asyncio.to_thread(self.automation.get_series, series_id)
+        if series is None or series.created_by != admin_id or not series.google_series_id:
+            raise RequestNotEditableError("series is unavailable")
+        try:
+            await self.calendar.delete_series(series.google_series_id)
+        except Exception as exc:
+            raise CalendarUnavailable("series cancellation failed") from exc
+        return await asyncio.to_thread(self.automation.cancel_series, series_id, admin_id)
+
+    async def admin_cancel_occurrence(self, series_id: int, occurrence_id: int, admin_id: int) -> EventOccurrence:
+        series = await asyncio.to_thread(self.automation.get_series, series_id)
+        occurrence = await asyncio.to_thread(self.automation.get_occurrence, occurrence_id)
+        if (
+            series is None
+            or occurrence is None
+            or occurrence.series_id != series_id
+            or series.created_by != admin_id
+            or not series.google_series_id
+        ):
+            raise RequestNotEditableError("occurrence is unavailable")
+        try:
+            await self.calendar.delete_occurrence(series.google_series_id, occurrence)
+        except Exception as exc:
+            raise CalendarUnavailable("occurrence cancellation failed") from exc
+        return await asyncio.to_thread(self.automation.cancel_occurrence, occurrence_id, admin_id)
+
+    async def admin_move_occurrence(
+        self,
+        series_id: int,
+        occurrence_id: int,
+        admin_id: int,
+        start_at: datetime,
+        duration_minutes: int,
+    ) -> EventOccurrence:
+        series = await asyncio.to_thread(self.automation.get_series, series_id)
+        occurrence = await asyncio.to_thread(self.automation.get_occurrence, occurrence_id)
+        if (
+            start_at.tzinfo is None
+            or not 1 <= duration_minutes <= 480
+            or series is None
+            or occurrence is None
+            or occurrence.series_id != series_id
+            or series.created_by != admin_id
+            or not series.google_series_id
+        ):
+            raise RequestNotEditableError("occurrence is unavailable")
+        start_utc = start_at.astimezone(UTC)
+        end_utc = start_utc + timedelta(minutes=duration_minutes)
+        if start_utc <= datetime.now(UTC):
+            raise BookingValidationError("occurrence must be in future")
+        try:
+            await self.calendar.update_occurrence(series.google_series_id, occurrence, start_utc, end_utc)
+            moved = await asyncio.to_thread(self.automation.move_occurrence, occurrence_id, admin_id, start_utc, end_utc)
+            try:
+                notification_rules = await asyncio.to_thread(load_notification_rules, self.database, self.settings)
+                if notification_rules.automation_enabled:
+                    await asyncio.to_thread(
+                        self.automation.rebuild_occurrence_reminders,
+                        moved.id,
+                        self.settings.admin_telegram_id,
+                        notification_rules.reminder_minutes,
+                    )
+            except Exception:
+                LOGGER.exception("miniapp_occurrence_reminders_failed", extra={"occurrence_id": occurrence_id})
+            return moved
+        except (BookingValidationError, RequestNotEditableError):
+            raise
+        except Exception as exc:
+            raise CalendarUnavailable("occurrence move failed") from exc
+
+    async def admin_approve_change(self, change_id: int, admin_id: int) -> tuple[ChangeRequest, MeetingRequest]:
+        change = await asyncio.to_thread(self.database.claim_change, change_id, admin_id)
+        if change is None:
+            raise RequestNotEditableError("change request is unavailable")
+        request = await asyncio.to_thread(self.database.get_request, change.request_id)
+        if request is None or not request.google_event_id:
+            await asyncio.to_thread(self.database.reset_change, change_id, "request_unavailable")
+            raise RequestNotEditableError("meeting is unavailable")
+        try:
+            if change.change_type == CHANGE_CANCEL:
+                await self.calendar.delete_event(request.google_event_id)
+            elif change.proposed_start_at is not None and change.proposed_end_at is not None:
+                if not await self.calendar.is_free(change.proposed_start_at, change.proposed_end_at):
+                    raise SlotConflictError("proposed slot is busy")
+                await self.calendar.update_event(replace(request, start_at=change.proposed_start_at, end_at=change.proposed_end_at))
+            else:
+                raise RequestNotEditableError("reschedule data is unavailable")
+            completed, updated = await asyncio.to_thread(self.database.complete_change, change.id, admin_id)
+            try:
+                if completed.change_type == CHANGE_CANCEL:
+                    await asyncio.to_thread(self.automation.cancel_request_jobs, updated.id)
+                else:
+                    notification_rules = await asyncio.to_thread(load_notification_rules, self.database, self.settings)
+                    await asyncio.to_thread(
+                        self.automation.rebuild_request_reminders,
+                        updated.id,
+                        self.settings.admin_telegram_id,
+                        notification_rules.reminder_minutes,
+                    )
+            except Exception:
+                LOGGER.exception("miniapp_change_reminders_failed", extra={"change_id": change_id})
+            return completed, updated
+        except (SlotConflictError, RequestNotEditableError):
+            await asyncio.to_thread(self.database.reset_change, change_id, "conflict")
+            raise
+        except Exception as exc:
+            await asyncio.to_thread(self.database.reset_change, change_id, type(exc).__name__)
+            raise CalendarUnavailable("change approval failed") from exc
+
+    async def admin_reject_change(self, change_id: int, admin_id: int) -> ChangeRequest:
+        change = await asyncio.to_thread(self.database.reject_change, change_id, admin_id)
+        if change is None:
+            raise RequestNotEditableError("change request is unavailable")
+        return change
 
     async def alternatives(self, request_id: int, telegram_id: int) -> list[RequestAlternative]:
         request = await asyncio.to_thread(self.database.get_request, request_id)

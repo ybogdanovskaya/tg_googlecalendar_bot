@@ -17,6 +17,7 @@ from app.config import Settings
 from app.db import Database
 from app.miniapp_api import ApiError, create_app, validate_telegram_init_data
 from app.miniapp_services import MiniAppBookingService
+from app.models import CHANGE_CANCEL
 from app.release_d_store import DELETE_COMPLETED, DELETE_KEEP_FUTURE
 
 
@@ -26,6 +27,27 @@ class FreeCalendar:
 
     async def is_free(self, start_at, end_at):
         return True
+
+    async def create_event(self, request):
+        return f"test-event-{request.id}"
+
+    async def create_series(self, series):
+        return f"test-series-{series.id}"
+
+    async def delete_series(self, series_id):
+        return True
+
+    async def delete_event(self, event_id):
+        return True
+
+    async def update_event(self, request):
+        return request.google_event_id
+
+    async def delete_occurrence(self, series_id, occurrence):
+        return True
+
+    async def update_occurrence(self, series_id, occurrence, start_at, end_at):
+        return f"test-occurrence-{occurrence.id}"
 
 
 class MiniAppApiTests(unittest.IsolatedAsyncioTestCase):
@@ -139,6 +161,222 @@ class MiniAppApiTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(wrong_origin.status_code, 403)
             self.assertEqual(wrong_origin.json()["error"]["code"], "CSRF_INVALID")
+
+    def test_admin_routes_require_server_side_admin_role(self) -> None:
+        app = create_app(self.settings, self.database, FreeCalendar(), cookie_secure=False)
+        with TestClient(app) as user_client:
+            user_client.post("/api/v1/auth/telegram", json={"init_data": self._signed_init_data(100)})
+            denied = user_client.get("/api/v1/admin/dashboard")
+            self.assertEqual(denied.status_code, 403)
+            self.assertEqual(denied.json()["error"]["code"], "ACCESS_DENIED")
+        with TestClient(app) as admin_client:
+            auth = admin_client.post("/api/v1/auth/telegram", json={"init_data": self._signed_init_data(1)})
+            self.assertEqual(auth.status_code, 200)
+            dashboard = admin_client.get("/api/v1/admin/dashboard")
+            self.assertEqual(dashboard.status_code, 200)
+            self.assertIn("pending_requests", dashboard.json())
+            self.assertEqual(admin_client.get("/api/v1/admin/requests").status_code, 200)
+            statistics = admin_client.get("/api/v1/admin/statistics?from_date=2026-01-01&to_date=2026-01-31")
+            self.assertEqual(statistics.status_code, 200)
+            self.assertEqual(statistics.json()["from_date"], "2026-01-01")
+            self.assertEqual(admin_client.get("/api/v1/admin/integration/calendar").json()["status"], "OK")
+
+    def test_admin_can_approve_or_reject_pending_request(self) -> None:
+        zone = ZoneInfo("Europe/Moscow")
+        start = datetime.combine(datetime.now(zone).date() + timedelta(days=3), clock_time(10, 0), zone).astimezone(ZoneInfo("UTC"))
+        first = self.database.create_request(
+            telegram_id=100, telegram_name="Тест", telegram_username="tester", email="test@example.com",
+            subject="Согласовать", description=None, location=None, start_at=start, end_at=start + timedelta(minutes=30), hold_hours=24,
+        )
+        second = self.database.create_request(
+            telegram_id=100, telegram_name="Тест", telegram_username="tester", email="test@example.com",
+            subject="Отклонить", description=None, location=None, start_at=start + timedelta(days=1), end_at=start + timedelta(days=1, minutes=30), hold_hours=24,
+        )
+        app = create_app(self.settings, self.database, FreeCalendar(), cookie_secure=False)
+        with TestClient(app) as client:
+            csrf = client.post("/api/v1/auth/telegram", json={"init_data": self._signed_init_data(1)}).json()["csrf_token"]
+            headers = {"X-CSRF-Token": csrf, "Idempotency-Key": "i" * 24}
+            edited = client.patch(
+                f"/api/v1/admin/requests/{first.id}",
+                json={"subject": "Обновлённая тема", "description": None},
+                headers={**headers, "Idempotency-Key": "w" * 24},
+            )
+            self.assertEqual(edited.status_code, 200)
+            self.assertEqual(edited.json()["subject"], "Обновлённая тема")
+            approved = client.post(f"/api/v1/admin/requests/{first.id}/approve", headers=headers)
+            self.assertEqual(approved.status_code, 200)
+            self.assertEqual(approved.json()["status"], "APPROVED")
+            rejected = client.post(f"/api/v1/admin/requests/{second.id}/reject", headers={**headers, "Idempotency-Key": "j" * 24})
+            self.assertEqual(rejected.status_code, 200)
+            self.assertEqual(rejected.json()["status"], "REJECTED")
+
+    def test_admin_can_offer_alternative_and_manage_settings(self) -> None:
+        zone = ZoneInfo("Europe/Moscow")
+        start = datetime.combine(datetime.now(zone).date() + timedelta(days=3), clock_time(10, 0), zone).astimezone(ZoneInfo("UTC"))
+        request = self.database.create_request(
+            telegram_id=100,
+            telegram_name="РўРµСЃС‚",
+            telegram_username="tester",
+            email="test@example.com",
+            subject="РџРµСЂРµРЅРѕСЃ",
+            description=None,
+            location=None,
+            start_at=start,
+            end_at=start + timedelta(minutes=30),
+            hold_hours=24,
+        )
+        app = create_app(self.settings, self.database, FreeCalendar(), cookie_secure=False)
+        with TestClient(app) as client:
+            csrf = client.post("/api/v1/auth/telegram", json={"init_data": self._signed_init_data(1)}).json()["csrf_token"]
+            headers = {"X-CSRF-Token": csrf, "Idempotency-Key": "k" * 24}
+
+            alternative = client.post(
+                f"/api/v1/admin/requests/{request.id}/alternatives",
+                json={"start_at": (start + timedelta(days=1)).isoformat(), "duration_minutes": 30},
+                headers=headers,
+            )
+            self.assertEqual(alternative.status_code, 200)
+            self.assertIn("id", alternative.json())
+            self.assertEqual(alternative.json()["duration_minutes"], 30)
+
+            settings = client.get("/api/v1/admin/settings")
+            self.assertEqual(settings.status_code, 200)
+            self.assertTrue(settings.json()["booking"]["booking_enabled"])
+            updated = client.patch(
+                "/api/v1/admin/settings",
+                json={"key": "booking_enabled", "value": False},
+                headers={**headers, "Idempotency-Key": "l" * 24},
+            )
+            self.assertEqual(updated.status_code, 200)
+            self.assertFalse(updated.json()["value"])
+
+            added = client.post(
+                "/api/v1/admin/closed-dates",
+                json={"date": "2099-01-01"},
+                headers={**headers, "Idempotency-Key": "m" * 24},
+            )
+            self.assertEqual(added.status_code, 200)
+            self.assertTrue(added.json()["added"])
+            self.assertIn("2099-01-01", client.get("/api/v1/admin/closed-dates").json()["items"])
+            removed = client.delete(
+                "/api/v1/admin/closed-dates/2099-01-01",
+                headers={**headers, "Idempotency-Key": "n" * 24},
+            )
+            self.assertEqual(removed.status_code, 204)
+
+    def test_admin_can_create_manual_meeting(self) -> None:
+        zone = ZoneInfo("Europe/Moscow")
+        start = datetime.combine(datetime.now(zone).date() + timedelta(days=4), clock_time(14, 0), zone)
+        app = create_app(self.settings, self.database, FreeCalendar(), cookie_secure=False)
+        with TestClient(app) as client:
+            csrf = client.post("/api/v1/auth/telegram", json={"init_data": self._signed_init_data(1)}).json()["csrf_token"]
+            created = client.post(
+                "/api/v1/admin/manual-meetings",
+                json={
+                    "subject": "Ручная встреча",
+                    "email": "guest@example.com",
+                    "start_at": start.isoformat(),
+                    "duration_minutes": 45,
+                    "blocks_calendar": True,
+                    "allow_overlap": False,
+                },
+                headers={"X-CSRF-Token": csrf, "Idempotency-Key": "o" * 24},
+            )
+            self.assertEqual(created.status_code, 200)
+            self.assertEqual(created.json()["status"], "APPROVED")
+            self.assertEqual(created.json()["email"], "guest@example.com")
+            self.assertEqual(len(client.get("/api/v1/admin/manual-meetings").json()["items"]), 1)
+            edited = client.patch(
+                f"/api/v1/admin/manual-meetings/{created.json()['id']}",
+                json={"subject": "Обновлённая ручная встреча"},
+                headers={"X-CSRF-Token": csrf, "Idempotency-Key": "x" * 24},
+            )
+            self.assertEqual(edited.status_code, 200)
+            self.assertEqual(edited.json()["subject"], "Обновлённая ручная встреча")
+            cancelled = client.post(
+                f"/api/v1/admin/manual-meetings/{created.json()['id']}/cancel",
+                headers={"X-CSRF-Token": csrf, "Idempotency-Key": "v" * 24},
+            )
+            self.assertEqual(cancelled.status_code, 200)
+            self.assertEqual(cancelled.json()["status"], "CANCELLED_BY_ADMIN")
+
+    def test_admin_can_create_and_cancel_series(self) -> None:
+        zone = ZoneInfo("Europe/Moscow")
+        start = datetime.combine(datetime.now(zone).date() + timedelta(days=5), clock_time(11, 0), zone)
+        app = create_app(self.settings, self.database, FreeCalendar(), cookie_secure=False)
+        with TestClient(app) as client:
+            csrf = client.post("/api/v1/auth/telegram", json={"init_data": self._signed_init_data(1)}).json()["csrf_token"]
+            headers = {"X-CSRF-Token": csrf, "Idempotency-Key": "p" * 24}
+            created = client.post(
+                "/api/v1/admin/series",
+                json={
+                    "subject": "Еженедельная встреча",
+                    "start_at": start.isoformat(),
+                    "duration_minutes": 30,
+                    "frequency": "WEEKLY",
+                    "until_date": (start.date() + timedelta(days=21)).isoformat(),
+                },
+                headers=headers,
+            )
+            self.assertEqual(created.status_code, 200)
+            self.assertEqual(created.json()["status"], "ACTIVE")
+            self.assertEqual(len(client.get("/api/v1/admin/series").json()["items"]), 1)
+            occurrences = client.get(f"/api/v1/admin/series/{created.json()['id']}/occurrences")
+            self.assertEqual(occurrences.status_code, 200)
+            occurrence_id = occurrences.json()["items"][0]["id"]
+            moved = client.patch(
+                f"/api/v1/admin/series/{created.json()['id']}/occurrences/{occurrence_id}",
+                json={"start_at": (start + timedelta(days=1)).isoformat(), "duration_minutes": 30},
+                headers={**headers, "Idempotency-Key": "t" * 24},
+            )
+            self.assertEqual(moved.status_code, 200)
+            self.assertEqual(moved.json()["status"], "MOVED")
+            occurrence_cancelled = client.post(
+                f"/api/v1/admin/series/{created.json()['id']}/occurrences/{occurrence_id}/cancel",
+                headers={**headers, "Idempotency-Key": "u" * 24},
+            )
+            self.assertEqual(occurrence_cancelled.status_code, 200)
+            self.assertEqual(occurrence_cancelled.json()["status"], "CANCELLED")
+            cancelled = client.post(
+                f"/api/v1/admin/series/{created.json()['id']}/cancel",
+                headers={**headers, "Idempotency-Key": "q" * 24},
+            )
+            self.assertEqual(cancelled.status_code, 200)
+            self.assertEqual(cancelled.json()["status"], "CANCELLED")
+
+    def test_admin_can_approve_or_reject_change_request(self) -> None:
+        zone = ZoneInfo("Europe/Moscow")
+        start = datetime.combine(datetime.now(zone).date() + timedelta(days=5), clock_time(11, 0), zone).astimezone(ZoneInfo("UTC"))
+        request = self.database.create_request(
+            telegram_id=100, telegram_name="Тест", telegram_username="tester", email="test@example.com",
+            subject="Изменение", description=None, location=None, start_at=start, end_at=start + timedelta(minutes=30), hold_hours=24,
+        )
+        self.assertIsNotNone(self.database.claim_for_approval(request.id, 1))
+        self.database.complete_approval(request.id, 1, "test-google-event")
+        cancel_change = self.database.create_change_request(request.id, 100, CHANGE_CANCEL)
+        second_request = self.database.create_request(
+            telegram_id=100, telegram_name="Тест", telegram_username="tester", email="test@example.com",
+            subject="Перенос", description=None, location=None, start_at=start + timedelta(days=1), end_at=start + timedelta(days=1, minutes=30), hold_hours=24,
+        )
+        self.assertIsNotNone(self.database.claim_for_approval(second_request.id, 1))
+        self.database.complete_approval(second_request.id, 1, "test-google-event-second")
+        reschedule_change = self.database.create_change_request(
+            second_request.id, 100, "RESCHEDULE", start + timedelta(days=3), start + timedelta(days=3, minutes=30)
+        )
+        app = create_app(self.settings, self.database, FreeCalendar(), cookie_secure=False)
+        with TestClient(app) as client:
+            csrf = client.post("/api/v1/auth/telegram", json={"init_data": self._signed_init_data(1)}).json()["csrf_token"]
+            headers = {"X-CSRF-Token": csrf, "Idempotency-Key": "r" * 24}
+            self.assertEqual(len(client.get("/api/v1/admin/change-requests").json()["items"]), 2)
+            rejected = client.post(f"/api/v1/admin/change-requests/{reschedule_change.id}/reject", headers=headers)
+            self.assertEqual(rejected.status_code, 200)
+            self.assertEqual(rejected.json()["status"], "REJECTED")
+            approved = client.post(
+                f"/api/v1/admin/change-requests/{cancel_change.id}/approve",
+                headers={**headers, "Idempotency-Key": "s" * 24},
+            )
+            self.assertEqual(approved.status_code, 200)
+            self.assertEqual(approved.json()["request"]["status"], "CANCELLED_BY_ADMIN")
 
     def test_http_does_not_expose_another_users_request(self) -> None:
         zone = ZoneInfo("Europe/Moscow")

@@ -2,8 +2,15 @@ import type {
   BookingCalendar,
   BookingConfig,
   BookingSlots,
+  AdminDashboard,
+  AdminStatistics,
+  CalendarIntegration,
+  AdminChangeRequest,
+  AdminSettings,
   ChangeRequest,
   DeletionRequest,
+  EventSeries,
+  EventOccurrence,
   MeetingRequest,
   RequestAlternative,
   SessionInfo
@@ -116,9 +123,140 @@ export class CalendarApi {
     return this.request<DeletionRequest>(`/deletion-requests/${encodeURIComponent(requestId)}/confirm`, { method: "POST", body: {}, mutation: true });
   }
 
+  async adminDashboard(): Promise<AdminDashboard> {
+    return this.request<AdminDashboard>("/admin/dashboard");
+  }
+
+  async adminStatistics(fromDate?: string, toDate?: string): Promise<AdminStatistics> {
+    const params = new URLSearchParams();
+    if (fromDate) params.set("from_date", fromDate);
+    if (toDate) params.set("to_date", toDate);
+    return this.request<AdminStatistics>(`/admin/statistics${params.size ? `?${params}` : ""}`);
+  }
+
+  async adminCalendarIntegration(): Promise<CalendarIntegration> {
+    return this.request<CalendarIntegration>("/admin/integration/calendar");
+  }
+
+  async adminRequests(): Promise<MeetingRequest[]> {
+    const response = await this.request<{ items: MeetingRequest[] }>("/admin/requests");
+    return response.items;
+  }
+
+  async updateAdminRequest(requestId: string, payload: Partial<Pick<MeetingRequest, "name" | "email" | "subject" | "description" | "location">>): Promise<MeetingRequest> {
+    return this.request<MeetingRequest>(`/admin/requests/${encodeURIComponent(requestId)}`, { method: "PATCH", body: payload, mutation: true });
+  }
+
+  async adminChangeRequests(): Promise<AdminChangeRequest[]> {
+    const response = await this.request<{ items: AdminChangeRequest[] }>("/admin/change-requests");
+    return response.items;
+  }
+
+  async approveAdminChange(changeId: string): Promise<AdminChangeRequest> {
+    return this.request<AdminChangeRequest>(`/admin/change-requests/${encodeURIComponent(changeId)}/approve`, { method: "POST", body: {}, mutation: true });
+  }
+
+  async rejectAdminChange(changeId: string): Promise<ChangeRequest> {
+    return this.request<ChangeRequest>(`/admin/change-requests/${encodeURIComponent(changeId)}/reject`, { method: "POST", body: {}, mutation: true });
+  }
+
+  async approveAdminRequest(requestId: string): Promise<MeetingRequest> {
+    return this.request<MeetingRequest>(`/admin/requests/${encodeURIComponent(requestId)}/approve`, { method: "POST", body: {}, mutation: true });
+  }
+
+  async rejectAdminRequest(requestId: string): Promise<MeetingRequest> {
+    return this.request<MeetingRequest>(`/admin/requests/${encodeURIComponent(requestId)}/reject`, { method: "POST", body: {}, mutation: true });
+  }
+
+  async createAdminAlternative(requestId: string, startAt: string, durationMinutes: number): Promise<RequestAlternative> {
+    return this.request<RequestAlternative>(`/admin/requests/${encodeURIComponent(requestId)}/alternatives`, { method: "POST", body: { start_at: startAt, duration_minutes: durationMinutes }, mutation: true });
+  }
+
+  async createAdminManualMeeting(payload: {
+    subject: string;
+    email?: string;
+    description?: string;
+    location?: string;
+    start_at: string;
+    duration_minutes: number;
+    blocks_calendar: boolean;
+    allow_overlap: boolean;
+  }): Promise<MeetingRequest> {
+    return this.request<MeetingRequest>("/admin/manual-meetings", { method: "POST", body: payload, mutation: true });
+  }
+
+  async adminManualMeetings(): Promise<MeetingRequest[]> {
+    const response = await this.request<{ items: MeetingRequest[] }>("/admin/manual-meetings");
+    return response.items;
+  }
+
+  async cancelAdminManualMeeting(requestId: string): Promise<MeetingRequest> {
+    return this.request<MeetingRequest>(`/admin/manual-meetings/${encodeURIComponent(requestId)}/cancel`, { method: "POST", body: {}, mutation: true });
+  }
+
+  async updateAdminManualMeeting(requestId: string, payload: Partial<Pick<MeetingRequest, "name" | "email" | "subject" | "description" | "location">>): Promise<MeetingRequest> {
+    return this.request<MeetingRequest>(`/admin/manual-meetings/${encodeURIComponent(requestId)}`, { method: "PATCH", body: payload, mutation: true });
+  }
+
+  async adminSeries(): Promise<EventSeries[]> {
+    const response = await this.request<{ items: EventSeries[] }>("/admin/series");
+    return response.items;
+  }
+
+  async createAdminSeries(payload: {
+    subject: string;
+    email?: string;
+    start_at: string;
+    duration_minutes: number;
+    frequency: EventSeries["frequency"];
+    until_date: string;
+    blocks_calendar: boolean;
+    allow_overlap: boolean;
+  }): Promise<EventSeries> {
+    return this.request<EventSeries>("/admin/series", { method: "POST", body: payload, mutation: true });
+  }
+
+  async cancelAdminSeries(seriesId: string): Promise<EventSeries> {
+    return this.request<EventSeries>(`/admin/series/${encodeURIComponent(seriesId)}/cancel`, { method: "POST", body: {}, mutation: true });
+  }
+
+  async adminSeriesOccurrences(seriesId: string): Promise<EventOccurrence[]> {
+    const response = await this.request<{ items: EventOccurrence[] }>(`/admin/series/${encodeURIComponent(seriesId)}/occurrences`);
+    return response.items;
+  }
+
+  async cancelAdminOccurrence(seriesId: string, occurrenceId: string): Promise<EventOccurrence> {
+    return this.request<EventOccurrence>(`/admin/series/${encodeURIComponent(seriesId)}/occurrences/${encodeURIComponent(occurrenceId)}/cancel`, { method: "POST", body: {}, mutation: true });
+  }
+
+  async moveAdminOccurrence(seriesId: string, occurrenceId: string, startAt: string, durationMinutes: number): Promise<EventOccurrence> {
+    return this.request<EventOccurrence>(`/admin/series/${encodeURIComponent(seriesId)}/occurrences/${encodeURIComponent(occurrenceId)}`, { method: "PATCH", body: { start_at: startAt, duration_minutes: durationMinutes }, mutation: true });
+  }
+
+  async adminSettings(): Promise<AdminSettings> {
+    return this.request<AdminSettings>("/admin/settings");
+  }
+
+  async updateAdminSetting(key: string, value: unknown): Promise<{ key: string; value: unknown }> {
+    return this.request<{ key: string; value: unknown }>("/admin/settings", { method: "PATCH", body: { key, value }, mutation: true });
+  }
+
+  async adminClosedDates(): Promise<string[]> {
+    const response = await this.request<{ items: string[] }>("/admin/closed-dates");
+    return response.items;
+  }
+
+  async addAdminClosedDate(date: string): Promise<void> {
+    await this.request("/admin/closed-dates", { method: "POST", body: { date }, mutation: true });
+  }
+
+  async removeAdminClosedDate(date: string): Promise<void> {
+    await this.request(`/admin/closed-dates/${encodeURIComponent(date)}`, { method: "DELETE", mutation: true });
+  }
+
   private async request<T = void>(
     path: string,
-    options: { method?: "POST" | "PATCH"; body?: unknown; mutation?: boolean; csrf?: boolean } = {}
+    options: { method?: "POST" | "PATCH" | "DELETE"; body?: unknown; mutation?: boolean; csrf?: boolean } = {}
   ): Promise<T> {
     const mutation = options.mutation ?? false;
     const headers: Record<string, string> = { Accept: "application/json" };

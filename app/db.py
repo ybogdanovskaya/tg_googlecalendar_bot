@@ -489,6 +489,68 @@ class Database:
             ).fetchall()
         return [self._row_to_request(row) for row in rows]
 
+    def list_admin_meetings(self, admin_id: int, limit: int = 50) -> list[MeetingRequest]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM meeting_requests
+                WHERE telegram_id = ? AND source = 'ADMIN'
+                ORDER BY start_at DESC, id DESC LIMIT ?
+                """,
+                (admin_id, limit),
+            ).fetchall()
+        return [self._row_to_request(row) for row in rows]
+
+    def cancel_admin_meeting(self, request_id: int, admin_id: int) -> MeetingRequest | None:
+        now = _iso(datetime.now(UTC))
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE meeting_requests SET status = ?, updated_at = ?
+                WHERE id = ? AND telegram_id = ? AND source = 'ADMIN' AND status = ?
+                """,
+                (CANCELLED_BY_ADMIN, now, request_id, admin_id, APPROVED),
+            )
+            if cursor.rowcount != 1:
+                return None
+            self._audit(connection, admin_id, "admin_meeting_cancelled", "meeting_request", str(request_id), {})
+        return self.get_request(request_id)
+
+    def update_admin_meeting_details(
+        self,
+        request_id: int,
+        admin_id: int,
+        changes: dict[str, str | None],
+    ) -> MeetingRequest:
+        allowed = {"telegram_name", "email", "subject", "description", "location"}
+        if not changes or any(key not in allowed for key in changes):
+            raise ValueError("no editable fields supplied")
+        assignments = ", ".join(f"{key} = ?" for key in changes)
+        now = _iso(datetime.now(UTC))
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                f"""
+                UPDATE meeting_requests SET {assignments}, updated_at = ?
+                WHERE id = ? AND telegram_id = ? AND source = 'ADMIN' AND status = ?
+                """,
+                (*changes.values(), now, request_id, admin_id, APPROVED),
+            )
+            if cursor.rowcount != 1:
+                raise RequestNotEditableError("manual meeting is not editable")
+            self._audit(connection, admin_id, "admin_meeting_updated", "meeting_request", str(request_id), {"fields": sorted(changes)})
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        result = self.get_request(request_id)
+        if result is None:
+            raise RuntimeError("updated manual meeting not found")
+        return result
+
     def update_pending_details(
         self,
         request_id: int,

@@ -7,7 +7,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl
@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.apps_script_calendar import AppsScriptCalendar
+from app.booking_rules import BOOKING_ENABLED, BOOKING_HORIZON_DAYS, DURATIONS, HOLD_HOURS, MIN_LEAD_MINUTES, STEP_MINUTES, USER_BOOKING_WINDOW, validate_value as validate_booking_setting
 from app.calendar_client import CalendarClient, CalendarUnavailable
 from app.config import Settings
 from app.db import Database
@@ -39,10 +40,13 @@ from app.models import (
     PENDING,
     REJECTED,
     ChangeRequest,
+    EventSeries,
+    EventOccurrence,
     MeetingRequest,
     RequestAlternative,
 )
-from app.release_d_store import DeletionRequest
+from app.notification_rules import AUTOMATION_ENABLED, PENDING_REMINDER_HOURS, REMINDER_MINUTES, load_notification_rules, validate_value as validate_notification_setting
+from app.release_d_store import DeletionRequest, ReleaseDStore
 
 
 COOKIE_NAME = "__Host-calendar_session"
@@ -100,6 +104,57 @@ class ChangeRequestBody(BaseModel):
 
 class DeletionRequestBody(BaseModel):
     mode: str = Field(pattern="^(CANCEL_FUTURE|KEEP_FUTURE)$")
+
+
+class AdminAlternativeBody(BaseModel):
+    start_at: datetime
+    duration_minutes: int = Field(ge=1, le=480)
+
+
+class AdminManualMeetingBody(BaseModel):
+    subject: str = Field(min_length=1, max_length=200)
+    email: str | None = Field(default=None, max_length=254)
+    description: str | None = Field(default=None, max_length=4000)
+    location: str | None = Field(default=None, max_length=1000)
+    start_at: datetime
+    duration_minutes: int = Field(ge=1, le=480)
+    blocks_calendar: bool = True
+    allow_overlap: bool = False
+
+
+class AdminRequestPatchBody(BaseModel):
+    name: str | None = Field(default=None, max_length=120)
+    email: str | None = Field(default=None, max_length=254)
+    subject: str | None = Field(default=None, max_length=200)
+    description: str | None = Field(default=None, max_length=4000)
+    location: str | None = Field(default=None, max_length=1000)
+
+
+class AdminSeriesBody(BaseModel):
+    subject: str = Field(min_length=1, max_length=200)
+    email: str | None = Field(default=None, max_length=254)
+    description: str | None = Field(default=None, max_length=4000)
+    location: str | None = Field(default=None, max_length=1000)
+    start_at: datetime
+    duration_minutes: int = Field(ge=1, le=480)
+    frequency: str = Field(pattern="^(DAILY|WEEKLY|MONTHLY)$")
+    until_date: date
+    blocks_calendar: bool = True
+    allow_overlap: bool = False
+
+
+class AdminOccurrenceMoveBody(BaseModel):
+    start_at: datetime
+    duration_minutes: int = Field(ge=1, le=480)
+
+
+class AdminSettingBody(BaseModel):
+    key: str = Field(min_length=1, max_length=80)
+    value: Any
+
+
+class ClosedDateBody(BaseModel):
+    date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _request_id() -> str:
@@ -183,6 +238,33 @@ def alternative_view(value: RequestAlternative, timezone_name: str) -> dict[str,
     }
 
 
+def series_view(value: EventSeries, timezone_name: str) -> dict[str, Any]:
+    zone = ZoneInfo(timezone_name)
+    return {
+        "id": str(value.id),
+        "subject": value.subject,
+        "email": value.email,
+        "description": value.description,
+        "location": value.location,
+        "start_at": value.start_at.astimezone(zone).isoformat(),
+        "end_at": value.end_at.astimezone(zone).isoformat(),
+        "frequency": value.frequency,
+        "until_date": value.until_date,
+        "status": value.status,
+        "blocks_calendar": value.blocks_calendar,
+        "allow_overlap": value.allow_overlap,
+    }
+
+
+def occurrence_view(value: EventOccurrence, timezone_name: str) -> dict[str, Any]:
+    zone = ZoneInfo(timezone_name)
+    return {
+        "id": str(value.id), "series_id": str(value.series_id), "status": value.status,
+        "start_at": value.actual_start_at.astimezone(zone).isoformat(),
+        "end_at": value.actual_end_at.astimezone(zone).isoformat(),
+    }
+
+
 def change_view(value: ChangeRequest, timezone_name: str) -> dict[str, Any]:
     zone = ZoneInfo(timezone_name)
     return {
@@ -257,6 +339,16 @@ def create_app(
             raise ApiError(403, "CSRF_INVALID", "Не удалось подтвердить действие.")
         return current
 
+    async def admin_actor(current: Actor = Depends(mutation_actor)) -> Actor:
+        if current.role != "ADMIN":
+            raise ApiError(403, "ACCESS_DENIED", "Нет доступа к управлению.")
+        return current
+
+    async def admin_reader(current: Actor = Depends(actor)) -> Actor:
+        if current.role != "ADMIN":
+            raise ApiError(403, "ACCESS_DENIED", "Нет доступа к управлению.")
+        return current
+
     def idempotency_key(value: str | None = Header(default=None, alias="Idempotency-Key")) -> str:
         if not value or len(value) > 128:
             raise ApiError(422, "VALIDATION_ERROR", "Для действия требуется ключ повтора.")
@@ -290,6 +382,303 @@ def create_app(
     async def get_me(current: Actor = Depends(actor)) -> dict[str, Any]:
         consent = await asyncio.to_thread(database.has_consent, current.telegram_id, settings.privacy_policy_version)
         return {"role": current.role, "consent": {"accepted": consent, "version": settings.privacy_policy_version}, "timezone": settings.timezone, "expires_at": current.expires_at.isoformat()}
+
+    @app.get("/api/v1/admin/dashboard")
+    async def admin_dashboard(_: Actor = Depends(admin_reader)) -> dict[str, Any]:
+        now = datetime.now(UTC)
+        statistics = await asyncio.to_thread(ReleaseDStore(database).statistics, now - timedelta(days=30), now)
+        pending = await asyncio.to_thread(database.list_pending, 100)
+        changes = await asyncio.to_thread(database.list_pending_changes, 100)
+        return {
+            "pending_requests": len(pending),
+            "pending_changes": len(changes),
+            "statistics": {
+                "user_requests": statistics.user_requests,
+                "manual_meetings": statistics.manual_meetings,
+                "calendar_meetings": statistics.calendar_meetings,
+                "unique_users": statistics.unique_users,
+            },
+        }
+
+    @app.get("/api/v1/admin/statistics")
+    async def admin_statistics(
+        from_date: date | None = None,
+        to_date: date | None = None,
+        _: Actor = Depends(admin_reader),
+    ) -> dict[str, Any]:
+        zone = ZoneInfo(settings.timezone)
+        today = datetime.now(zone).date()
+        period_from = from_date or today - timedelta(days=29)
+        period_to = to_date or today
+        if period_to < period_from or period_to > period_from + timedelta(days=366):
+            raise ApiError(422, "VALIDATION_ERROR", "Период статистики должен составлять от одного дня до года.")
+        start = datetime.combine(period_from, datetime.min.time(), zone).astimezone(UTC)
+        end = datetime.combine(period_to + timedelta(days=1), datetime.min.time(), zone).astimezone(UTC)
+        value = await asyncio.to_thread(ReleaseDStore(database).statistics, start, end)
+        return {
+            "from_date": period_from.isoformat(), "to_date": period_to.isoformat(),
+            "user_requests": value.user_requests, "manual_meetings": value.manual_meetings,
+            "calendar_meetings": value.calendar_meetings, "unique_users": value.unique_users,
+        }
+
+    @app.get("/api/v1/admin/integration/calendar")
+    async def admin_calendar_integration(_: Actor = Depends(admin_reader)) -> dict[str, Any]:
+        checked_at = datetime.now(UTC)
+        try:
+            await calendar.is_free(checked_at, checked_at + timedelta(minutes=1))
+        except Exception:
+            return {"status": "UNAVAILABLE", "checked_at": checked_at.astimezone(ZoneInfo(settings.timezone)).isoformat()}
+        return {"status": "OK", "checked_at": checked_at.astimezone(ZoneInfo(settings.timezone)).isoformat()}
+
+    @app.get("/api/v1/admin/requests")
+    async def admin_requests(_: Actor = Depends(admin_reader)) -> dict[str, Any]:
+        items = await asyncio.to_thread(database.list_pending, 100)
+        return {"items": [request_view(item, settings.timezone) for item in items]}
+
+    @app.get("/api/v1/admin/requests/{request_id}")
+    async def admin_request(request_id: int, _: Actor = Depends(admin_reader)) -> dict[str, Any]:
+        value = await asyncio.to_thread(database.get_request, request_id)
+        if value is None:
+            raise ApiError(404, "NOT_FOUND", "Заявка не найдена.")
+        return request_view(value, settings.timezone)
+
+    @app.patch("/api/v1/admin/requests/{request_id}")
+    async def admin_update_request(request_id: int, body: AdminRequestPatchBody, current: Actor = Depends(admin_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
+        fields = {"name": "telegram_name", "email": "email", "subject": "subject", "description": "description", "location": "location"}
+        changes = {target: getattr(body, source) for source, target in fields.items() if source in body.model_fields_set}
+        if not changes:
+            raise ApiError(422, "VALIDATION_ERROR", "Укажите хотя бы одно поле для изменения.")
+        try:
+            value = await asyncio.to_thread(database.admin_update_pending_details, request_id, current.telegram_id, changes)
+        except (RequestNotEditableError, ValueError) as exc:
+            raise ApiError(409, "CONFLICT", "Заявка больше недоступна для редактирования.") from exc
+        return request_view(value, settings.timezone)
+
+    @app.get("/api/v1/admin/change-requests")
+    async def admin_change_requests(_: Actor = Depends(admin_reader)) -> dict[str, Any]:
+        changes = await asyncio.to_thread(database.list_pending_changes, 100)
+        items: list[dict[str, Any]] = []
+        for change in changes:
+            request = await asyncio.to_thread(database.get_request, change.request_id)
+            if request is not None:
+                items.append({"change": change_view(change, settings.timezone), "request": request_view(request, settings.timezone)})
+        return {"items": items}
+
+    @app.post("/api/v1/admin/change-requests/{change_id}/approve")
+    async def admin_approve_change(change_id: int, current: Actor = Depends(admin_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
+        try:
+            change, request = await service.admin_approve_change(change_id, current.telegram_id)
+        except RequestNotEditableError as exc:
+            raise ApiError(409, "CONFLICT", "Запрос на изменение уже недоступен.") from exc
+        except SlotConflictError as exc:
+            raise ApiError(409, "SLOT_UNAVAILABLE", "Новое время уже занято. Запрос возвращён на согласование.") from exc
+        except CalendarUnavailable as exc:
+            raise ApiError(503, "EXTERNAL_UNAVAILABLE", "Календарь временно недоступен.", True) from exc
+        return {"change": change_view(change, settings.timezone), "request": request_view(request, settings.timezone)}
+
+    @app.post("/api/v1/admin/change-requests/{change_id}/reject")
+    async def admin_reject_change(change_id: int, current: Actor = Depends(admin_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
+        try:
+            value = await service.admin_reject_change(change_id, current.telegram_id)
+        except RequestNotEditableError as exc:
+            raise ApiError(409, "CONFLICT", "Запрос на изменение уже недоступен.") from exc
+        return change_view(value, settings.timezone)
+
+    @app.post("/api/v1/admin/requests/{request_id}/approve")
+    async def admin_approve_request(request_id: int, current: Actor = Depends(admin_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
+        try:
+            value = await service.admin_approve_request(request_id, current.telegram_id)
+        except RequestNotEditableError as exc:
+            raise ApiError(409, "CONFLICT", "Заявка уже обработана.") from exc
+        except SlotConflictError as exc:
+            raise ApiError(409, "SLOT_UNAVAILABLE", "Время уже занято. Заявка возвращена на согласование.") from exc
+        except CalendarUnavailable as exc:
+            raise ApiError(503, "EXTERNAL_UNAVAILABLE", "Календарь временно недоступен. Заявка сохранена.", True) from exc
+        return request_view(value, settings.timezone)
+
+    @app.post("/api/v1/admin/requests/{request_id}/reject")
+    async def admin_reject_request(request_id: int, current: Actor = Depends(admin_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
+        try:
+            value = await service.admin_reject_request(request_id, current.telegram_id)
+        except RequestNotEditableError as exc:
+            raise ApiError(409, "CONFLICT", "Заявка уже обработана.") from exc
+        return request_view(value, settings.timezone)
+
+    @app.post("/api/v1/admin/requests/{request_id}/alternatives")
+    async def admin_create_alternative(request_id: int, body: AdminAlternativeBody, current: Actor = Depends(admin_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
+        try:
+            value = await service.admin_create_alternative(request_id, current.telegram_id, body.start_at, body.duration_minutes)
+        except BookingValidationError as exc:
+            raise ApiError(422, "VALIDATION_ERROR", "Укажите корректное время альтернативы.") from exc
+        except RequestNotEditableError as exc:
+            raise ApiError(409, "CONFLICT", "Для этой заявки нельзя предложить другое время.") from exc
+        except SlotConflictError as exc:
+            raise ApiError(409, "SLOT_UNAVAILABLE", "Это время уже занято. Выберите другой слот.") from exc
+        except CalendarUnavailable as exc:
+            raise ApiError(503, "EXTERNAL_UNAVAILABLE", "Календарь временно недоступен.", True) from exc
+        return alternative_view(value, settings.timezone)
+
+    @app.post("/api/v1/admin/manual-meetings")
+    async def admin_create_manual_meeting(body: AdminManualMeetingBody, current: Actor = Depends(admin_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
+        try:
+            value = await service.admin_create_manual_meeting(
+                admin_id=current.telegram_id,
+                subject=body.subject,
+                email=body.email,
+                description=body.description,
+                location=body.location,
+                start_at=body.start_at,
+                duration_minutes=body.duration_minutes,
+                blocks_calendar=body.blocks_calendar,
+                allow_overlap=body.allow_overlap,
+            )
+        except BookingValidationError as exc:
+            raise ApiError(422, "VALIDATION_ERROR", "Данные встречи некорректны.") from exc
+        except SlotConflictError as exc:
+            raise ApiError(409, "SLOT_UNAVAILABLE", "В это время уже есть встреча.") from exc
+        except CalendarUnavailable as exc:
+            raise ApiError(503, "EXTERNAL_UNAVAILABLE", "Календарь временно недоступен.", True) from exc
+        return request_view(value, settings.timezone)
+
+    @app.get("/api/v1/admin/manual-meetings")
+    async def admin_manual_meetings(current: Actor = Depends(admin_reader)) -> dict[str, Any]:
+        items = await asyncio.to_thread(database.list_admin_meetings, current.telegram_id, 50)
+        return {"items": [request_view(item, settings.timezone) for item in items]}
+
+    @app.post("/api/v1/admin/manual-meetings/{request_id}/cancel")
+    async def admin_cancel_manual_meeting(request_id: int, current: Actor = Depends(admin_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
+        try:
+            value = await service.admin_cancel_manual_meeting(request_id, current.telegram_id)
+        except RequestNotEditableError as exc:
+            raise ApiError(409, "CONFLICT", "Ручная встреча больше недоступна.") from exc
+        except CalendarUnavailable as exc:
+            raise ApiError(503, "EXTERNAL_UNAVAILABLE", "Не удалось отменить встречу в календаре.", True) from exc
+        return request_view(value, settings.timezone)
+
+    @app.patch("/api/v1/admin/manual-meetings/{request_id}")
+    async def admin_update_manual_meeting(request_id: int, body: AdminRequestPatchBody, current: Actor = Depends(admin_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
+        fields = {"name": "telegram_name", "email": "email", "subject": "subject", "description": "description", "location": "location"}
+        changes = {target: getattr(body, source) for source, target in fields.items() if source in body.model_fields_set}
+        if not changes:
+            raise ApiError(422, "VALIDATION_ERROR", "Укажите хотя бы одно поле для изменения.")
+        try:
+            value = await service.admin_update_manual_meeting(request_id, current.telegram_id, changes)
+        except RequestNotEditableError as exc:
+            raise ApiError(409, "CONFLICT", "Ручная встреча больше недоступна для редактирования.") from exc
+        except CalendarUnavailable as exc:
+            raise ApiError(503, "EXTERNAL_UNAVAILABLE", "Не удалось обновить встречу в календаре.", True) from exc
+        return request_view(value, settings.timezone)
+
+    @app.get("/api/v1/admin/series")
+    async def admin_series(current: Actor = Depends(admin_reader)) -> dict[str, Any]:
+        items = await asyncio.to_thread(service.automation.list_series, current.telegram_id, 50)
+        return {"items": [series_view(item, settings.timezone) for item in items]}
+
+    @app.post("/api/v1/admin/series")
+    async def admin_create_series(body: AdminSeriesBody, current: Actor = Depends(admin_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
+        try:
+            value = await service.admin_create_series(
+                admin_id=current.telegram_id,
+                subject=body.subject,
+                email=body.email,
+                description=body.description,
+                location=body.location,
+                start_at=body.start_at,
+                duration_minutes=body.duration_minutes,
+                frequency=body.frequency,
+                until_date=body.until_date,
+                blocks_calendar=body.blocks_calendar,
+                allow_overlap=body.allow_overlap,
+            )
+        except BookingValidationError as exc:
+            raise ApiError(422, "VALIDATION_ERROR", "Параметры серии некорректны.") from exc
+        except SlotConflictError as exc:
+            raise ApiError(409, "SLOT_UNAVAILABLE", "Одна из встреч серии пересекается с занятым временем.") from exc
+        except CalendarUnavailable as exc:
+            raise ApiError(503, "EXTERNAL_UNAVAILABLE", "Календарь временно недоступен.", True) from exc
+        return series_view(value, settings.timezone)
+
+    @app.post("/api/v1/admin/series/{series_id}/cancel")
+    async def admin_cancel_series(series_id: int, current: Actor = Depends(admin_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
+        try:
+            value = await service.admin_cancel_series(series_id, current.telegram_id)
+        except RequestNotEditableError as exc:
+            raise ApiError(409, "CONFLICT", "Серия больше недоступна.") from exc
+        except CalendarUnavailable as exc:
+            raise ApiError(503, "EXTERNAL_UNAVAILABLE", "Не удалось отменить серию в календаре.", True) from exc
+        return series_view(value, settings.timezone)
+
+    @app.get("/api/v1/admin/series/{series_id}/occurrences")
+    async def admin_series_occurrences(series_id: int, current: Actor = Depends(admin_reader)) -> dict[str, Any]:
+        series = await asyncio.to_thread(service.automation.get_series, series_id)
+        if series is None or series.created_by != current.telegram_id:
+            raise ApiError(404, "NOT_FOUND", "Серия не найдена.")
+        items = await asyncio.to_thread(service.automation.list_occurrences, series_id, future_only=True, limit=100)
+        return {"items": [occurrence_view(item, settings.timezone) for item in items]}
+
+    @app.post("/api/v1/admin/series/{series_id}/occurrences/{occurrence_id}/cancel")
+    async def admin_cancel_occurrence(series_id: int, occurrence_id: int, current: Actor = Depends(admin_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
+        try:
+            value = await service.admin_cancel_occurrence(series_id, occurrence_id, current.telegram_id)
+        except RequestNotEditableError as exc:
+            raise ApiError(409, "CONFLICT", "Повторение больше недоступно.") from exc
+        except CalendarUnavailable as exc:
+            raise ApiError(503, "EXTERNAL_UNAVAILABLE", "Не удалось отменить повторение в календаре.", True) from exc
+        return occurrence_view(value, settings.timezone)
+
+    @app.patch("/api/v1/admin/series/{series_id}/occurrences/{occurrence_id}")
+    async def admin_move_occurrence(series_id: int, occurrence_id: int, body: AdminOccurrenceMoveBody, current: Actor = Depends(admin_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
+        try:
+            value = await service.admin_move_occurrence(series_id, occurrence_id, current.telegram_id, body.start_at, body.duration_minutes)
+        except BookingValidationError as exc:
+            raise ApiError(422, "VALIDATION_ERROR", "Новое время повторения некорректно.") from exc
+        except RequestNotEditableError as exc:
+            raise ApiError(409, "CONFLICT", "Повторение больше недоступно.") from exc
+        except CalendarUnavailable as exc:
+            raise ApiError(503, "EXTERNAL_UNAVAILABLE", "Не удалось перенести повторение в календаре.", True) from exc
+        return occurrence_view(value, settings.timezone)
+
+    @app.get("/api/v1/admin/settings")
+    async def admin_settings(_: Actor = Depends(admin_reader)) -> dict[str, Any]:
+        rules = await asyncio.to_thread(service.rules)
+        notifications = await asyncio.to_thread(load_notification_rules, database, settings)
+        return {
+            "booking": {"booking_enabled": rules.booking_enabled, "min_lead_minutes": rules.min_lead_minutes, "booking_horizon_days": rules.booking_horizon_days, "hold_hours": rules.hold_hours, "durations": list(rules.durations), "step_minutes": rules.step_minutes, "user_booking_window": [rules.user_booking_start_minutes, rules.user_booking_end_minutes]},
+            "notifications": {"reminder_minutes": list(notifications.reminder_minutes), "pending_reminder_hours": notifications.pending_reminder_hours, "automation_enabled": notifications.automation_enabled},
+        }
+
+    @app.patch("/api/v1/admin/settings")
+    async def admin_update_setting(body: AdminSettingBody, current: Actor = Depends(admin_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
+        booking_keys = {BOOKING_ENABLED, MIN_LEAD_MINUTES, BOOKING_HORIZON_DAYS, HOLD_HOURS, DURATIONS, STEP_MINUTES, USER_BOOKING_WINDOW}
+        notification_keys = {REMINDER_MINUTES, PENDING_REMINDER_HOURS, AUTOMATION_ENABLED}
+        try:
+            value = validate_booking_setting(body.key, body.value) if body.key in booking_keys else validate_notification_setting(body.key, body.value) if body.key in notification_keys else None
+        except (TypeError, ValueError) as exc:
+            raise ApiError(422, "VALIDATION_ERROR", "Недопустимое значение настройки.") from exc
+        if value is None:
+            raise ApiError(422, "VALIDATION_ERROR", "Неизвестная настройка.")
+        await asyncio.to_thread(database.set_setting, body.key, value, current.telegram_id)
+        return {"key": body.key, "value": value}
+
+    @app.get("/api/v1/admin/closed-dates")
+    async def admin_closed_dates(_: Actor = Depends(admin_reader)) -> dict[str, Any]:
+        return {"items": await asyncio.to_thread(database.list_closed_dates, None, 365)}
+
+    @app.post("/api/v1/admin/closed-dates")
+    async def admin_add_closed_date(body: ClosedDateBody, current: Actor = Depends(admin_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
+        try:
+            datetime.fromisoformat(body.date)
+        except ValueError as exc:
+            raise ApiError(422, "VALIDATION_ERROR", "Укажите корректную дату.") from exc
+        added = await asyncio.to_thread(database.add_closed_date, body.date, current.telegram_id)
+        return {"date": body.date, "added": added}
+
+    @app.delete("/api/v1/admin/closed-dates/{local_date}")
+    async def admin_remove_closed_date(local_date: str, current: Actor = Depends(admin_actor), _: str = Depends(idempotency_key)) -> Response:
+        removed = await asyncio.to_thread(database.remove_closed_date, local_date, current.telegram_id)
+        if not removed:
+            raise ApiError(404, "NOT_FOUND", "Закрытая дата не найдена.")
+        return Response(status_code=204)
 
     @app.post("/api/v1/consents")
     async def accept_consent(body: ConsentBody, current: Actor = Depends(mutation_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
