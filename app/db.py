@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import hashlib
+import hmac
+import secrets
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -47,6 +50,7 @@ from app.models import (
     EventOccurrence,
     EventSeries,
     MeetingRequest,
+    MiniAppSession,
     RequestAlternative,
     ScheduledJob,
 )
@@ -70,6 +74,27 @@ class RequestNotEditableError(RuntimeError):
     pass
 
 
+class IdempotencyConflictError(RuntimeError):
+    pass
+
+
+class _ClosingConnection(sqlite3.Connection):
+    """Close SQLite connections when a transaction context exits.
+
+    ``sqlite3.Connection`` commits or rolls back in ``__exit__``, but leaves the
+    file handle open.  The application consistently uses ``with
+    self._connect()`` for short transactions; closing here keeps that idiom
+    safe on Windows too, where an open handle prevents cleanup of a temporary
+    test database.
+    """
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> bool:
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 class Database:
     def __init__(self, path: Path, backup_dir: Path | None = None) -> None:
         self.path = path
@@ -77,7 +102,7 @@ class Database:
         self.last_migration_result: MigrationResult | None = None
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=15)
+        connection = sqlite3.connect(self.path, timeout=15, factory=_ClosingConnection)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 15000")
@@ -296,6 +321,136 @@ class Database:
         if request is None:
             raise RuntimeError("created request not found")
         return request
+
+    def create_request_idempotent(
+        self,
+        *,
+        telegram_id: int,
+        telegram_name: str,
+        telegram_username: str | None,
+        email: str,
+        subject: str,
+        description: str | None,
+        location: str | None,
+        start_at: datetime,
+        end_at: datetime,
+        hold_hours: int,
+        idempotency_key: str,
+        request_hash: str,
+    ) -> tuple[MeetingRequest, bool]:
+        """Create one request per idempotency key inside the reservation transaction."""
+        now_dt = datetime.now(UTC)
+        now = _iso(now_dt)
+        hold_until = _iso(now_dt + timedelta(hours=hold_hours))
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            prior = connection.execute(
+                """
+                SELECT request_hash, request_id FROM miniapp_idempotency
+                WHERE telegram_id = ? AND operation = 'create_request' AND idempotency_key = ?
+                  AND expires_at > ?
+                """,
+                (telegram_id, idempotency_key, now),
+            ).fetchone()
+            if prior is not None:
+                if not hmac.compare_digest(str(prior["request_hash"]), request_hash):
+                    raise IdempotencyConflictError("idempotency key was reused with another payload")
+                row = connection.execute(
+                    "SELECT * FROM meeting_requests WHERE id = ?", (int(prior["request_id"]),)
+                ).fetchone()
+                if row is None:
+                    raise RuntimeError("idempotency request target is missing")
+                connection.commit()
+                return self._row_to_request(row), True
+            conflict = connection.execute(
+                """
+                SELECT id FROM meeting_requests
+                WHERE start_at < ? AND end_at > ?
+                  AND blocks_calendar = 1
+                  AND (status = ? OR (status IN (?, ?) AND hold_until > ?))
+                LIMIT 1
+                """,
+                (_iso(end_at), _iso(start_at), APPROVED, PENDING, APPROVING, now),
+            ).fetchone()
+            if conflict:
+                raise SlotConflictError("slot already reserved")
+            cursor = connection.execute(
+                """
+                INSERT INTO meeting_requests (
+                    telegram_id, telegram_name, telegram_username, email, subject,
+                    description, location, start_at, end_at, status, hold_until,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    telegram_id, telegram_name, telegram_username, email, subject,
+                    description, location, _iso(start_at), _iso(end_at), PENDING, hold_until, now, now,
+                ),
+            )
+            request_id = int(cursor.lastrowid)
+            connection.execute(
+                """
+                INSERT INTO miniapp_idempotency (
+                    telegram_id, operation, idempotency_key, request_hash, request_id, created_at, expires_at
+                ) VALUES (?, 'create_request', ?, ?, ?, ?, ?)
+                """,
+                (telegram_id, idempotency_key, request_hash, request_id, now, _iso(now_dt + timedelta(hours=24))),
+            )
+            self._audit(connection, telegram_id, "request_created", "meeting_request", str(request_id), {"source": "miniapp"})
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        request = self.get_request(request_id)
+        if request is None:
+            raise RuntimeError("created request not found")
+        return request, False
+
+    def create_miniapp_session(self, telegram_id: int, ttl_seconds: int = 1800) -> tuple[str, str, datetime]:
+        token = secrets.token_urlsafe(32)
+        csrf_token = secrets.token_urlsafe(32)
+        now_dt = datetime.now(UTC)
+        expires_at = now_dt + timedelta(seconds=ttl_seconds)
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        csrf_hash = hashlib.sha256(csrf_token.encode("utf-8")).hexdigest()
+        with self._connect() as connection:
+            connection.execute("DELETE FROM miniapp_sessions WHERE expires_at <= ?", (_iso(now_dt),))
+            connection.execute(
+                """
+                INSERT INTO miniapp_sessions (token_hash, telegram_id, csrf_hash, expires_at, created_at, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (token_hash, telegram_id, csrf_hash, _iso(expires_at), _iso(now_dt), _iso(now_dt)),
+            )
+        return token, csrf_token, expires_at
+
+    def get_miniapp_session(self, token: str) -> MiniAppSession | None:
+        now = _iso(datetime.now(UTC))
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT telegram_id, csrf_hash, expires_at FROM miniapp_sessions
+                WHERE token_hash = ? AND expires_at > ?
+                """,
+                (token_hash, now),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute("UPDATE miniapp_sessions SET last_seen_at = ? WHERE token_hash = ?", (now, token_hash))
+        return MiniAppSession(int(row["telegram_id"]), str(row["csrf_hash"]), _dt(str(row["expires_at"])))
+
+    def verify_miniapp_csrf(self, session: MiniAppSession, csrf_token: str) -> bool:
+        candidate = hashlib.sha256(csrf_token.encode("utf-8")).hexdigest()
+        return hmac.compare_digest(session.csrf_hash, candidate)
+
+    def delete_miniapp_session(self, token: str) -> None:
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        with self._connect() as connection:
+            connection.execute("DELETE FROM miniapp_sessions WHERE token_hash = ?", (token_hash,))
 
     def get_request(self, request_id: int) -> MeetingRequest | None:
         with self._connect() as connection:

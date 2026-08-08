@@ -110,8 +110,17 @@ class DatabaseTests(unittest.TestCase):
 
     def test_schema_is_versioned(self) -> None:
         version, release = self.db.schema_info()
-        self.assertEqual(version, 5)
+        self.assertEqual(version, 6)
         self.assertEqual(release, "release-d")
+
+    def test_miniapp_session_is_hashed_and_can_be_removed(self) -> None:
+        token, csrf_token, _ = self.db.create_miniapp_session(100, ttl_seconds=60)
+        session = self.db.get_miniapp_session(token)
+        self.assertIsNotNone(session)
+        self.assertEqual(session.telegram_id, 100)
+        self.assertTrue(self.db.verify_miniapp_csrf(session, csrf_token))
+        self.db.delete_miniapp_session(token)
+        self.assertIsNone(self.db.get_miniapp_session(token))
 
     def test_latest_requests_are_displayed_with_newest_at_bottom(self) -> None:
         base = datetime(2026, 8, 11, 9, 0, tzinfo=UTC)
