@@ -44,11 +44,11 @@
 
 ## Критерии приёмки подзадачи 6.1
 
-- [ ] В `dev` в GitHub Actions видны Python checks и независимые Mini App checks.
-- [ ] Mini App checks используют lockfile и не публикуют секреты.
+- [x] В workflow добавлена независимая задача Mini App checks; её запуск в GitHub Actions проверяется после отправки commit в `dev`.
+- [x] Mini App checks используют lockfile и не публикуют secrets.
 - [ ] `npm test` и `npm run build` проходят на чистом GitHub-hosted runner.
 - [ ] Сбой frontend-проверки делает CI красным, но не запускает deploy.
-- [ ] Ничего не передаётся на VPS, GitHub Environment и `main` не меняются.
+- [x] Ничего не передаётся на VPS, GitHub Environment и `main` не меняются.
 
 ## Что нужно подтвердить владельцу
 
