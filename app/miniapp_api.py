@@ -31,7 +31,18 @@ from app.miniapp_services import (
     RequestNotEditableError,
     SlotConflictError,
 )
-from app.models import APPROVED, APPROVING, CANCELLED, CANCELLED_BY_ADMIN, PENDING, REJECTED, MeetingRequest
+from app.models import (
+    APPROVED,
+    APPROVING,
+    CANCELLED,
+    CANCELLED_BY_ADMIN,
+    PENDING,
+    REJECTED,
+    ChangeRequest,
+    MeetingRequest,
+    RequestAlternative,
+)
+from app.release_d_store import DeletionRequest
 
 
 COOKIE_NAME = "__Host-calendar_session"
@@ -85,6 +96,10 @@ class ChangeRequestBody(BaseModel):
     change_type: str = Field(pattern="^(CANCEL|RESCHEDULE)$")
     start_at: datetime | None = None
     duration_minutes: int | None = None
+
+
+class DeletionRequestBody(BaseModel):
+    mode: str = Field(pattern="^(CANCEL_FUTURE|KEEP_FUTURE)$")
 
 
 def _request_id() -> str:
@@ -154,6 +169,40 @@ def request_view(value: MeetingRequest, timezone_name: str) -> dict[str, Any]:
         "status": value.status, "status_label": labels.get(value.status, "Обновляется"),
         "reservation": {"active": value.status == PENDING and value.hold_until > now, "until": value.hold_until.astimezone(zone).isoformat()},
         "allowed_actions": actions, "created_at": value.created_at.astimezone(zone).isoformat(), "updated_at": value.updated_at.astimezone(zone).isoformat(),
+    }
+
+
+def alternative_view(value: RequestAlternative, timezone_name: str) -> dict[str, Any]:
+    zone = ZoneInfo(timezone_name)
+    return {
+        "id": str(value.id),
+        "start_at": value.start_at.astimezone(zone).isoformat(),
+        "end_at": value.end_at.astimezone(zone).isoformat(),
+        "duration_minutes": int((value.end_at - value.start_at).total_seconds() // 60),
+        "expires_at": value.hold_until.astimezone(zone).isoformat(),
+    }
+
+
+def change_view(value: ChangeRequest, timezone_name: str) -> dict[str, Any]:
+    zone = ZoneInfo(timezone_name)
+    return {
+        "id": str(value.id),
+        "change_type": value.change_type,
+        "status": value.status,
+        "proposed_start_at": value.proposed_start_at.astimezone(zone).isoformat() if value.proposed_start_at else None,
+        "proposed_end_at": value.proposed_end_at.astimezone(zone).isoformat() if value.proposed_end_at else None,
+        "created_at": value.created_at.astimezone(zone).isoformat(),
+    }
+
+
+def deletion_view(value: DeletionRequest, timezone_name: str) -> dict[str, Any]:
+    zone = ZoneInfo(timezone_name)
+    return {
+        "id": str(value.id),
+        "mode": value.mode,
+        "status": value.status,
+        "future_meeting_count": value.future_meeting_count,
+        "execute_after": value.execute_after.astimezone(zone).isoformat() if value.execute_after else None,
     }
 
 
@@ -249,6 +298,15 @@ def create_app(
         await asyncio.to_thread(database.set_consent, current.telegram_id, settings.privacy_policy_version)
         return {"accepted": True, "version": settings.privacy_policy_version}
 
+    @app.get("/api/v1/privacy-policy")
+    async def privacy_policy(_: Actor = Depends(actor)) -> dict[str, Any]:
+        return {
+            "version": settings.privacy_policy_version,
+            "summary": "Контактные данные используются только для обработки заявки, уведомлений и организации встречи.",
+            "calendar_privacy": "Содержимое личного Google Calendar не передаётся Mini App.",
+            "rights": ["Можно запросить удаление данных и отмену будущих встреч.", "Можно сохранить будущие встречи с минимальными данными до их завершения."],
+        }
+
     @app.get("/api/v1/booking/config")
     async def booking_config(_: Actor = Depends(actor)) -> dict[str, Any]:
         rules = await asyncio.to_thread(service.rules)
@@ -332,6 +390,69 @@ def create_app(
         if not changed:
             raise ApiError(409, "CONFLICT", "Заявку больше нельзя отменить.")
         return Response(status_code=204)
+
+    @app.get("/api/v1/requests/{request_id}/alternatives")
+    async def list_alternatives(request_id: int, current: Actor = Depends(actor)) -> dict[str, Any]:
+        try:
+            alternatives = await service.alternatives(request_id, current.telegram_id)
+        except RequestNotEditableError as exc:
+            raise ApiError(404, "NOT_FOUND", "Заявка не найдена.") from exc
+        return {"items": [alternative_view(item, settings.timezone) for item in alternatives]}
+
+    @app.post("/api/v1/requests/{request_id}/alternatives/{alternative_id}/accept")
+    async def accept_alternative(request_id: int, alternative_id: int, current: Actor = Depends(mutation_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
+        try:
+            value = await service.accept_alternative(request_id, alternative_id, current.telegram_id)
+        except RequestNotEditableError as exc:
+            raise ApiError(409, "CONFLICT", "Этот вариант больше недоступен.") from exc
+        except SlotConflictError as exc:
+            raise ApiError(409, "SLOT_UNAVAILABLE", "Этот вариант уже занят. Выберите другой.") from exc
+        except CalendarUnavailable as exc:
+            raise ApiError(503, "EXTERNAL_UNAVAILABLE", "Календарь временно недоступен.", True) from exc
+        return request_view(value, settings.timezone)
+
+    @app.post("/api/v1/requests/{request_id}/alternatives/decline")
+    async def decline_alternatives(request_id: int, current: Actor = Depends(mutation_actor), _: str = Depends(idempotency_key)) -> Response:
+        try:
+            await service.decline_alternatives(request_id, current.telegram_id)
+        except RequestNotEditableError as exc:
+            raise ApiError(409, "CONFLICT", "Варианты больше недоступны.") from exc
+        return Response(status_code=204)
+
+    @app.post("/api/v1/requests/{request_id}/change-requests")
+    async def create_change_request(request_id: int, body: ChangeRequestBody, current: Actor = Depends(mutation_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
+        try:
+            value = await service.create_change_request(
+                request_id=request_id,
+                telegram_id=current.telegram_id,
+                change_type=body.change_type,
+                start_at=body.start_at,
+                duration_minutes=body.duration_minutes,
+            )
+        except BookingValidationError as exc:
+            raise ApiError(422, "VALIDATION_ERROR", "Проверьте выбранное время для изменения встречи.") from exc
+        except RequestNotEditableError as exc:
+            raise ApiError(409, "CONFLICT", "Запрос на изменение больше недоступен.") from exc
+        except SlotConflictError as exc:
+            raise ApiError(409, "SLOT_UNAVAILABLE", "Это время уже занято. Выберите другой слот.") from exc
+        except CalendarUnavailable as exc:
+            raise ApiError(503, "EXTERNAL_UNAVAILABLE", "Календарь временно недоступен.", True) from exc
+        return change_view(value, settings.timezone)
+
+    @app.post("/api/v1/deletion-requests")
+    async def create_deletion_request(body: DeletionRequestBody, current: Actor = Depends(mutation_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
+        value = await service.create_deletion_request(current.telegram_id, body.mode)
+        return deletion_view(value, settings.timezone)
+
+    @app.post("/api/v1/deletion-requests/{deletion_id}/confirm")
+    async def confirm_deletion_request(deletion_id: int, current: Actor = Depends(mutation_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
+        try:
+            value = await service.confirm_deletion_request(deletion_id, current.telegram_id)
+        except RequestNotEditableError as exc:
+            raise ApiError(409, "CONFLICT", "Запрос на удаление больше недоступен.") from exc
+        except CalendarUnavailable as exc:
+            raise ApiError(503, "EXTERNAL_UNAVAILABLE", "Календарь временно недоступен. Повторите позднее.", True) from exc
+        return deletion_view(value, settings.timezone)
 
     return app
 

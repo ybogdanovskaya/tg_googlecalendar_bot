@@ -14,8 +14,17 @@ from app.automation_store import AutomationStore
 from app.calendar_client import CalendarClient, CalendarUnavailable
 from app.config import Settings
 from app.db import Database, IdempotencyConflictError, RequestNotEditableError, SlotConflictError
-from app.models import MeetingRequest
+from app.models import CHANGE_CANCEL, CHANGE_RESCHEDULE, ChangeRequest, MeetingRequest, RequestAlternative
 from app.notification_rules import load_notification_rules
+from app.release_d_store import (
+    DELETE_CANCEL_FUTURE,
+    DELETE_COMPLETED,
+    DELETE_KEEP_FUTURE,
+    DELETE_REQUESTED,
+    DELETE_WAITING,
+    DeletionRequest,
+    ReleaseDStore,
+)
 from app.slots import available_slots, booking_periods, slot_in_period
 
 
@@ -50,6 +59,7 @@ class MiniAppBookingService:
         self.database = database
         self.calendar = calendar
         self.automation = automation or AutomationStore(database)
+        self.deletions = ReleaseDStore(database)
         self.zone = ZoneInfo(settings.timezone)
 
     def rules(self) -> BookingRules:
@@ -201,6 +211,79 @@ class MiniAppBookingService:
         except Exception:
             LOGGER.exception("miniapp_cancelled_request_jobs_cleanup_failed", extra={"request_id": request_id})
         return True
+
+    async def alternatives(self, request_id: int, telegram_id: int) -> list[RequestAlternative]:
+        request = await asyncio.to_thread(self.database.get_request, request_id)
+        if request is None or request.telegram_id != telegram_id:
+            raise RequestNotEditableError("request is unavailable")
+        return await asyncio.to_thread(self.database.list_offered_alternatives, request_id)
+
+    async def accept_alternative(self, request_id: int, alternative_id: int, telegram_id: int) -> MeetingRequest:
+        alternative = await asyncio.to_thread(self.database.get_alternative, alternative_id)
+        if alternative is None or alternative.request_id != request_id:
+            raise RequestNotEditableError("alternative is unavailable")
+        if not await self.calendar.is_free(alternative.start_at, alternative.end_at):
+            raise SlotConflictError("alternative slot is busy")
+        return await asyncio.to_thread(
+            self.database.accept_alternative,
+            alternative_id,
+            telegram_id,
+            self.rules().hold_hours,
+        )
+
+    async def decline_alternatives(self, request_id: int, telegram_id: int) -> int:
+        return await asyncio.to_thread(self.database.decline_alternatives, request_id, telegram_id)
+
+    async def create_change_request(
+        self,
+        *,
+        request_id: int,
+        telegram_id: int,
+        change_type: str,
+        start_at: datetime | None,
+        duration_minutes: int | None,
+    ) -> ChangeRequest:
+        if change_type == CHANGE_CANCEL:
+            if start_at is not None or duration_minutes is not None:
+                raise BookingValidationError("cancel change cannot include a slot")
+            return await asyncio.to_thread(self.database.create_change_request, request_id, telegram_id, CHANGE_CANCEL)
+        if change_type != CHANGE_RESCHEDULE or start_at is None or duration_minutes is None:
+            raise BookingValidationError("reschedule requires a slot")
+        start_utc, end_utc = self._validate_slot(start_at, duration_minutes, self.rules())
+        if not await self.calendar.is_free(start_utc, end_utc):
+            raise SlotConflictError("google calendar slot is busy")
+        return await asyncio.to_thread(
+            self.database.create_change_request,
+            request_id,
+            telegram_id,
+            CHANGE_RESCHEDULE,
+            start_utc,
+            end_utc,
+        )
+
+    async def create_deletion_request(self, telegram_id: int, mode: str) -> DeletionRequest:
+        return await asyncio.to_thread(self.deletions.create_deletion_request, telegram_id, mode)
+
+    async def confirm_deletion_request(self, request_id: int, telegram_id: int) -> DeletionRequest:
+        request = await asyncio.to_thread(self.deletions.get_deletion_request, request_id)
+        if request is None or request.telegram_id != telegram_id or request.status != DELETE_REQUESTED:
+            raise RequestNotEditableError("deletion request is unavailable")
+        if request.mode == DELETE_CANCEL_FUTURE:
+            try:
+                for _, event_id in await asyncio.to_thread(self.deletions.future_google_events, request):
+                    await self.calendar.delete_event(event_id)
+            except Exception as exc:
+                await asyncio.to_thread(self.deletions.mark_deletion_failed, request.id, type(exc).__name__)
+                raise CalendarUnavailable("calendar deletion failed") from exc
+            await asyncio.to_thread(self.deletions.complete_cancel_future, request.id, telegram_id)
+        elif request.mode == DELETE_KEEP_FUTURE:
+            await asyncio.to_thread(self.deletions.complete_keep_future, request.id, telegram_id)
+        else:
+            raise RequestNotEditableError("deletion mode is unavailable")
+        completed = await asyncio.to_thread(self.deletions.get_deletion_request, request_id)
+        if completed is None or completed.status not in {DELETE_COMPLETED, DELETE_WAITING}:
+            raise RuntimeError("deletion request did not complete")
+        return completed
 
     def _validate_date_and_duration(self, selected_date: date, duration_minutes: int, rules: BookingRules) -> None:
         today = datetime.now(self.zone).date()

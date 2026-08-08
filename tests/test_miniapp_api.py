@@ -17,6 +17,7 @@ from app.config import Settings
 from app.db import Database
 from app.miniapp_api import ApiError, create_app, validate_telegram_init_data
 from app.miniapp_services import MiniAppBookingService
+from app.release_d_store import DELETE_COMPLETED, DELETE_KEEP_FUTURE
 
 
 class FreeCalendar:
@@ -161,6 +162,84 @@ class MiniAppApiTests(unittest.IsolatedAsyncioTestCase):
             response = client.get(f"/api/v1/requests/{created.id}")
             self.assertEqual(response.status_code, 404)
             self.assertEqual(response.json()["error"]["code"], "NOT_FOUND")
+
+    def test_http_accepts_only_owned_alternative(self) -> None:
+        zone = ZoneInfo("Europe/Moscow")
+        start = datetime.combine(datetime.now(zone).date() + timedelta(days=3), clock_time(10, 0), zone).astimezone(ZoneInfo("UTC"))
+        request = self.database.create_request(
+            telegram_id=100,
+            telegram_name="Тест",
+            telegram_username="tester",
+            email="test@example.com",
+            subject="Альтернатива",
+            description=None,
+            location=None,
+            start_at=start,
+            end_at=start + timedelta(minutes=30),
+            hold_hours=24,
+        )
+        alternative = self.database.create_alternative(
+            request.id,
+            1,
+            start + timedelta(days=1),
+            start + timedelta(days=1, minutes=30),
+            24,
+        )
+        app = create_app(self.settings, self.database, FreeCalendar(), cookie_secure=False)
+        with TestClient(app) as client:
+            auth = client.post("/api/v1/auth/telegram", json={"init_data": self._signed_init_data()})
+            csrf_token = auth.json()["csrf_token"]
+            listed = client.get(f"/api/v1/requests/{request.id}/alternatives")
+            self.assertEqual(listed.status_code, 200)
+            self.assertEqual(listed.json()["items"][0]["id"], str(alternative.id))
+            accepted = client.post(
+                f"/api/v1/requests/{request.id}/alternatives/{alternative.id}/accept",
+                headers={"Idempotency-Key": "e" * 24, "X-CSRF-Token": csrf_token},
+            )
+            self.assertEqual(accepted.status_code, 200)
+            self.assertEqual(accepted.json()["id"], str(request.id))
+
+    def test_http_creates_change_request_and_confirms_keep_future_deletion(self) -> None:
+        zone = ZoneInfo("Europe/Moscow")
+        start = datetime.combine(datetime.now(zone).date() + timedelta(days=3), clock_time(10, 0), zone).astimezone(ZoneInfo("UTC"))
+        request = self.database.create_request(
+            telegram_id=100,
+            telegram_name="Тест",
+            telegram_username="tester",
+            email="test@example.com",
+            subject="Назначенная встреча",
+            description=None,
+            location=None,
+            start_at=start,
+            end_at=start + timedelta(minutes=30),
+            hold_hours=24,
+        )
+        self.assertIsNotNone(self.database.claim_for_approval(request.id, 1))
+        self.database.complete_approval(request.id, 1, "test-google-event")
+        app = create_app(self.settings, self.database, FreeCalendar(), cookie_secure=False)
+        with TestClient(app) as client:
+            auth = client.post("/api/v1/auth/telegram", json={"init_data": self._signed_init_data()})
+            csrf_token = auth.json()["csrf_token"]
+            changed = client.post(
+                f"/api/v1/requests/{request.id}/change-requests",
+                json={"change_type": "RESCHEDULE", "start_at": (start + timedelta(days=2)).isoformat(), "duration_minutes": 30},
+                headers={"Idempotency-Key": "f" * 24, "X-CSRF-Token": csrf_token},
+            )
+            self.assertEqual(changed.status_code, 200)
+            self.assertEqual(changed.json()["change_type"], "RESCHEDULE")
+
+            created = client.post(
+                "/api/v1/deletion-requests",
+                json={"mode": DELETE_KEEP_FUTURE},
+                headers={"Idempotency-Key": "g" * 24, "X-CSRF-Token": csrf_token},
+            )
+            self.assertEqual(created.status_code, 200)
+            completed = client.post(
+                f"/api/v1/deletion-requests/{created.json()['id']}/confirm",
+                headers={"Idempotency-Key": "h" * 24, "X-CSRF-Token": csrf_token},
+            )
+            self.assertEqual(completed.status_code, 200)
+            self.assertNotEqual(completed.json()["status"], DELETE_COMPLETED)
 
 
 if __name__ == "__main__":
