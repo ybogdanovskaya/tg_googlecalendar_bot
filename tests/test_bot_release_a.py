@@ -103,6 +103,18 @@ class ReleaseABotTests(unittest.TestCase):
         self.assertGreater(len(router.callback_query.handlers), 20)
         self.assertGreater(len(router.message.handlers), 5)
 
+    def test_router_contains_period_and_booking_window_handlers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Database(Path(temporary) / "router.sqlite3")
+            database.initialize()
+            router = create_router(self.settings(), database, FakeCalendar())
+        callback_handlers = {item.callback.__name__ for item in router.callback_query.handlers}
+        message_handlers = {item.callback.__name__ for item in router.message.handlers}
+        self.assertIn("select_period", callback_handlers)
+        self.assertIn("return_to_periods", callback_handlers)
+        self.assertIn("choose_booking_window", callback_handlers)
+        self.assertIn("receive_booking_window", message_handlers)
+
     def test_privacy_text_describes_release_d_retention(self) -> None:
         text = privacy_text(self.settings())
         self.assertIn("не более 12 месяцев", text)

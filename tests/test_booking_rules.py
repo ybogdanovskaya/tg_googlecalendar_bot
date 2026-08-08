@@ -5,7 +5,14 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from app.booking_rules import DURATIONS, MIN_LEAD_MINUTES, load_rules, validate_value
+from app.booking_rules import (
+    DURATIONS,
+    MIN_LEAD_MINUTES,
+    USER_BOOKING_WINDOW,
+    load_rules,
+    parse_booking_window,
+    validate_value,
+)
 from app.db import Database
 
 
@@ -35,6 +42,27 @@ class BookingRulesTests(unittest.TestCase):
     def test_at_least_one_duration_is_required(self) -> None:
         with self.assertRaises(ValueError):
             validate_value(DURATIONS, [])
+
+    def test_user_booking_window_defaults_to_eight_until_twenty_one(self) -> None:
+        rules = load_rules(self.db, self.settings)
+        self.assertEqual(rules.user_booking_start_minutes, 8 * 60)
+        self.assertEqual(rules.user_booking_end_minutes, 21 * 60)
+
+    def test_user_booking_window_can_be_changed_without_restart(self) -> None:
+        self.db.set_setting(USER_BOOKING_WINDOW, [9 * 60, 20 * 60], 1)
+        rules = load_rules(self.db, self.settings)
+        self.assertEqual(
+            (rules.user_booking_start_minutes, rules.user_booking_end_minutes),
+            (9 * 60, 20 * 60),
+        )
+
+    def test_booking_window_accepts_time_with_or_without_colons(self) -> None:
+        self.assertEqual(parse_booking_window("0800-2100"), [8 * 60, 21 * 60])
+        self.assertEqual(parse_booking_window("08:00–21:00"), [8 * 60, 21 * 60])
+
+    def test_booking_window_rejects_reversed_range(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_booking_window("2100-0800")
 
 
 if __name__ == "__main__":

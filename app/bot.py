@@ -22,8 +22,11 @@ from app.booking_rules import (
     HOLD_HOURS,
     MIN_LEAD_MINUTES,
     STEP_MINUTES,
+    USER_BOOKING_WINDOW,
     BookingRules,
+    format_clock_minutes,
     load_rules,
+    parse_booking_window,
     validate_value,
 )
 from app.automation_store import AutomationStore
@@ -33,7 +36,7 @@ from app.date_picker import calendar_keyboard, month_from_callback
 from app.db import Database, RequestNotEditableError, SlotConflictError
 from app.models import APPROVED, APPROVING, CANCELLED, CANCELLED_BY_ADMIN, PENDING, REJECTED, MeetingRequest
 from app.notification_rules import load_notification_rules
-from app.slots import available_slots
+from app.slots import SlotPeriod, available_slots, booking_periods, slot_in_period
 
 
 LOGGER = logging.getLogger(__name__)
@@ -48,6 +51,7 @@ SETTING_LABELS = {
     HOLD_HOURS: "Резерв слота",
     DURATIONS: "Длительности",
     STEP_MINUTES: "Шаг слотов",
+    USER_BOOKING_WINDOW: "Время записи пользователей",
 }
 
 EDIT_FIELD_LABELS = {
@@ -75,6 +79,7 @@ class Editing(StatesGroup):
 
 class AdminSettings(StatesGroup):
     value = State()
+    booking_window = State()
     closed_date = State()
 
 
@@ -305,6 +310,7 @@ def create_router(
         selected_date: date,
         duration: int,
         exclude_request_id: int | None = None,
+        unrestricted_time: bool = False,
     ) -> list[datetime]:
         current_rules = rules()
         if selected_date.isoformat() in set(
@@ -325,9 +331,17 @@ def create_router(
             timezone_name=settings.timezone,
             min_lead_minutes=current_rules.min_lead_minutes,
             step_minutes=current_rules.step_minutes,
+            window_start_minutes=(0 if unrestricted_time else current_rules.user_booking_start_minutes),
+            window_end_minutes=(24 * 60 if unrestricted_time else current_rules.user_booking_end_minutes),
         )
 
-    async def render_slot_page(target: Message, state: FSMContext, page: int) -> None:
+    def period_label(period: SlotPeriod) -> str:
+        return (
+            f"{period.title} "
+            f"{format_clock_minutes(period.start_minutes)}–{format_clock_minutes(period.end_minutes)}"
+        )
+
+    async def render_period_selection(target: Message, state: FSMContext) -> None:
         data = await state.get_data()
         selected_date = _date_from_callback(data["selected_date"])
         duration = int(data["duration"])
@@ -344,10 +358,86 @@ def create_router(
             return
         if not slots:
             await target.edit_text(
-                "На эту дату нет свободных слотов.",
+                "На эту дату нет свободных слотов в доступное время.",
                 reply_markup=_keyboard(
                     [[InlineKeyboardButton(text="← К датам", callback_data=f"dpage:{data.get('date_page', 0)}")]]
                 ),
+            )
+            return
+        current = rules()
+        periods = booking_periods(
+            current.user_booking_start_minutes,
+            current.user_booking_end_minutes,
+        )
+        rows: list[list[InlineKeyboardButton]] = []
+        lines = [
+            f"Выберите часть дня на {selected_date:%d.%m.%Y}:",
+            f"Длительность встречи: {duration} мин.",
+            "",
+        ]
+        for period in periods:
+            count = sum(slot_in_period(slot, period) for slot in slots)
+            suffix = "слот" if count == 1 else "слота" if 2 <= count <= 4 else "слотов"
+            count_text = f"{count} {suffix}"
+            lines.append(f"{period_label(period)} — {count_text if count else 'нет свободного времени'}")
+            if count:
+                rows.append(
+                    [
+                        InlineKeyboardButton(
+                            text=f"{period.title} — {count_text}",
+                            callback_data=f"period:{period.key}",
+                        )
+                    ]
+                )
+        rows.append([InlineKeyboardButton(text="← К датам", callback_data=f"dpage:{data.get('date_page', 0)}")])
+        await state.update_data(slot_period=None)
+        await target.edit_text("\n".join(lines), reply_markup=_keyboard(rows))
+
+    async def render_slot_page(target: Message, state: FSMContext, page: int) -> None:
+        data = await state.get_data()
+        selected_date = _date_from_callback(data["selected_date"])
+        duration = int(data["duration"])
+        exclude_request_id = int(data["edit_request_id"]) if data.get("flow") == "edit" else None
+        unrestricted_time = bool(data.get("unrestricted_time"))
+        try:
+            slots = await load_slots(selected_date, duration, exclude_request_id, unrestricted_time)
+        except CalendarUnavailable:
+            await target.edit_text(
+                "Google Calendar сейчас недоступен. Попробуйте позже.",
+                reply_markup=_keyboard(
+                    [[InlineKeyboardButton(text="← К датам", callback_data=f"dpage:{data.get('date_page', 0)}")]]
+                ),
+            )
+            return
+        selected_period: SlotPeriod | None = None
+        if not unrestricted_time:
+            current = rules()
+            selected_period = next(
+                (
+                    period
+                    for period in booking_periods(
+                        current.user_booking_start_minutes,
+                        current.user_booking_end_minutes,
+                    )
+                    if period.key == data.get("slot_period")
+                ),
+                None,
+            )
+            if selected_period is None:
+                await render_period_selection(target, state)
+                return
+            slots = [slot for slot in slots if slot_in_period(slot, selected_period)]
+        if not slots:
+            back_button = (
+                InlineKeyboardButton(text="← К датам", callback_data=f"dpage:{data.get('date_page', 0)}")
+                if unrestricted_time
+                else InlineKeyboardButton(text="← К частям дня", callback_data="periods")
+            )
+            await target.edit_text(
+                "На эту дату нет свободных слотов."
+                if unrestricted_time
+                else "В выбранной части дня свободных слотов больше нет.",
+                reply_markup=_keyboard([[back_button]]),
             )
             return
         max_page = (len(slots) - 1) // SLOT_PAGE_SIZE
@@ -368,9 +458,13 @@ def create_router(
         if page < max_page:
             navigation.append(InlineKeyboardButton(text="→", callback_data=f"spage:{page + 1}"))
         rows.append(navigation)
-        rows.append([InlineKeyboardButton(text="← К датам", callback_data=f"dpage:{data.get('date_page', 0)}")])
+        if unrestricted_time:
+            rows.append([InlineKeyboardButton(text="← К датам", callback_data=f"dpage:{data.get('date_page', 0)}")])
+        else:
+            rows.append([InlineKeyboardButton(text="← К частям дня", callback_data="periods")])
+        period_text = f", {period_label(selected_period).lower()}" if selected_period else ""
         await target.edit_text(
-            f"Свободно {selected_date:%d.%m.%Y}, длительность {duration} мин:\n"
+            f"Свободно {selected_date:%d.%m.%Y}, длительность {duration} мин{period_text}:\n"
             "Время указано по Москве.",
             reply_markup=_keyboard(rows),
         )
@@ -471,6 +565,9 @@ def create_router(
             f"Резерв слота: <b>{current.hold_hours} ч.</b>\n"
             f"Длительности: <b>{durations_text} мин</b>\n"
             f"Шаг слотов: <b>{current.step_minutes} мин</b>\n"
+            "Время записи пользователей: "
+            f"<b>{format_clock_minutes(current.user_booking_start_minutes)}–"
+            f"{format_clock_minutes(current.user_booking_end_minutes)}</b>\n"
             "Часовой пояс: <b>Москва</b>"
         )
 
@@ -487,6 +584,7 @@ def create_router(
                         InlineKeyboardButton(text="📆 Горизонт", callback_data=f"aset:value:{BOOKING_HORIZON_DAYS}"),
                     ],
                     [InlineKeyboardButton(text="⌛ Резерв слота", callback_data=f"aset:value:{HOLD_HOURS}")],
+                    [InlineKeyboardButton(text="🕘 Время для пользователей", callback_data="aset:window")],
                     [
                         InlineKeyboardButton(text="🕒 Длительности", callback_data="aset:durations"),
                         InlineKeyboardButton(text="📏 Шаг слотов", callback_data="aset:steps"),
@@ -617,7 +715,11 @@ def create_router(
             await callback.answer("Эта длительность сейчас недоступна", show_alert=True)
             return
         await state.set_state(Booking.choosing_date)
-        await state.update_data(duration=duration, flow="new")
+        await state.update_data(
+            duration=duration,
+            flow="new",
+            unrestricted_time=is_admin(callback.from_user.id),
+        )
         await render_date_page(callback.message, state, 0)
         await callback.answer()
 
@@ -652,7 +754,38 @@ def create_router(
         await state.update_data(selected_date=raw)
         await state.set_state(Booking.choosing_slot)
         await callback.answer()
+        if is_admin(callback.from_user.id):
+            await render_slot_page(callback.message, state, 0)
+        else:
+            await render_period_selection(callback.message, state)
+
+    @router.callback_query(Booking.choosing_slot, F.data.startswith("period:"))
+    async def select_period(callback: CallbackQuery, state: FSMContext) -> None:
+        if callback.message is None:
+            return
+        current = rules()
+        key = callback.data.split(":", 1)[1]
+        valid_keys = {
+            period.key
+            for period in booking_periods(
+                current.user_booking_start_minutes,
+                current.user_booking_end_minutes,
+            )
+        }
+        if key not in valid_keys:
+            await callback.answer("Этот интервал больше недоступен", show_alert=True)
+            await render_period_selection(callback.message, state)
+            return
+        await state.update_data(slot_period=key)
+        await callback.answer()
         await render_slot_page(callback.message, state, 0)
+
+    @router.callback_query(Booking.choosing_slot, F.data == "periods")
+    async def return_to_periods(callback: CallbackQuery, state: FSMContext) -> None:
+        if callback.message is None:
+            return
+        await callback.answer()
+        await render_period_selection(callback.message, state)
 
     @router.callback_query(Booking.choosing_slot, F.data.startswith("spage:"))
     async def slot_page(callback: CallbackQuery, state: FSMContext) -> None:
@@ -678,6 +811,15 @@ def create_router(
         )
         duration = int(data["duration"])
         current = rules()
+        end_local = start_local + timedelta(minutes=duration)
+        if not is_admin(callback.from_user.id):
+            local_midnight = datetime.combine(selected_date, time.min, zone)
+            window_start = local_midnight + timedelta(minutes=current.user_booking_start_minutes)
+            window_end = local_midnight + timedelta(minutes=current.user_booking_end_minutes)
+            if start_local < window_start or end_local > window_end:
+                await callback.answer("Время находится вне доступного интервала", show_alert=True)
+                await render_period_selection(callback.message, state)
+                return
         if start_local < datetime.now(zone) + timedelta(minutes=current.min_lead_minutes):
             await callback.answer("Этот слот уже недоступен", show_alert=True)
             await render_slot_page(callback.message, state, 0)
@@ -833,6 +975,15 @@ def create_router(
         end_at = start_at + timedelta(minutes=duration)
         current = rules()
         local_start = start_at.astimezone(zone)
+        local_end = end_at.astimezone(zone)
+        local_midnight = datetime.combine(local_start.date(), time.min, zone)
+        outside_user_window = (
+            not is_admin(callback.from_user.id)
+            and (
+                local_start < local_midnight + timedelta(minutes=current.user_booking_start_minutes)
+                or local_end > local_midnight + timedelta(minutes=current.user_booking_end_minutes)
+            )
+        )
         today = datetime.now(zone).date()
         closed = set(await asyncio.to_thread(db.list_closed_dates, local_start.date().isoformat(), 1))
         if (
@@ -842,6 +993,7 @@ def create_router(
             or local_start.date() >= today + timedelta(days=current.booking_horizon_days)
             or local_start.date().isoformat() in closed
             or local_start < datetime.now(zone) + timedelta(minutes=current.min_lead_minutes)
+            or outside_user_window
         ):
             await state.clear()
             await callback.answer("Условия записи изменились", show_alert=True)
@@ -1072,7 +1224,12 @@ def create_router(
             return
         await state.set_state(Booking.choosing_date)
         await state.set_data(
-            {"duration": duration, "flow": "edit", "edit_request_id": request_id}
+            {
+                "duration": duration,
+                "flow": "edit",
+                "edit_request_id": request_id,
+                "unrestricted_time": is_admin(callback.from_user.id),
+            }
         )
         await callback.answer()
         if callback.message:
@@ -1190,6 +1347,43 @@ def create_router(
         await asyncio.to_thread(db.set_setting, key, value, message.from_user.id)
         await state.clear()
         await message.answer("Настройка сохранена.")
+        await render_admin_settings(message)
+
+    @router.callback_query(F.data == "aset:window")
+    async def choose_booking_window(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await require_admin(callback):
+            return
+        current = rules()
+        await state.set_state(AdminSettings.booking_window)
+        await state.set_data({})
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(
+                "Введите время, когда пользователи могут назначать встречи.\n"
+                "Например: 0800-2100 или 08:00-21:00.\n\n"
+                "Текущее значение: "
+                f"{format_clock_minutes(current.user_booking_start_minutes)}–"
+                f"{format_clock_minutes(current.user_booking_end_minutes)}.",
+                reply_markup=cancel_keyboard(),
+            )
+
+    @router.message(AdminSettings.booking_window)
+    async def receive_booking_window(message: Message, state: FSMContext) -> None:
+        if message.from_user is None or not is_admin(message.from_user.id):
+            await message.answer("Нет доступа.")
+            await state.clear()
+            return
+        try:
+            value = parse_booking_window(message.text or "")
+        except (TypeError, ValueError) as exc:
+            await message.answer(f"Некорректный интервал: {exc}. Введите ещё раз.")
+            return
+        await asyncio.to_thread(db.set_setting, USER_BOOKING_WINDOW, value, message.from_user.id)
+        await state.clear()
+        await message.answer(
+            "Время записи пользователей сохранено: "
+            f"{format_clock_minutes(value[0])}–{format_clock_minutes(value[1])}."
+        )
         await render_admin_settings(message)
 
     @router.callback_query(F.data == "aset:steps")
