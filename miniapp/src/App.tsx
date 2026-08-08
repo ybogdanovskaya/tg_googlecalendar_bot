@@ -92,7 +92,7 @@ export default function App() {
         {screen === "more" && <More api={api} policyVersion={session.consent.version} />}
         {screen === "admin" && session.role === "ADMIN" && <AdminPanel api={api} />}
       </section>
-      {session.role === "ADMIN" && <div className="admin-nav-link"><button className={`text-button ${screen === "admin" ? "active" : ""}`} onClick={() => setScreen("admin")}>\u0423\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435 \u043a\u0430\u043b\u0435\u043d\u0434\u0430\u0440\u0451\u043c</button></div>}
+      {session.role === "ADMIN" && <div className="admin-nav-link"><button className={`text-button ${screen === "admin" ? "active" : ""}`} onClick={() => setScreen("admin")}>Управление календарём</button></div>}
       <nav className="bottom-nav" aria-label="Основная навигация">
         <NavButton active={screen === "home"} icon="⌂" label="Главная" onClick={() => setScreen("home")} />
         <NavButton active={screen === "requests"} icon="▤" label="Мои встречи" onClick={() => setScreen("requests")} />
