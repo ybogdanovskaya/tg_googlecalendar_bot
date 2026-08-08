@@ -1,0 +1,80 @@
+name: Deploy production
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: calendar-bot-production
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify production candidate
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Verify candidate
+        run: |
+          python -m pip check
+          python scripts/check_repository_secrets.py
+          python -m compileall -q app scripts tests
+          python -m unittest discover -s tests -v
+
+  deploy:
+    name: Deploy after approval
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+
+    steps:
+      - name: Check out verified commit
+        uses: actions/checkout@v6
+
+      - name: Build deployment archive
+        run: |
+          printf '%s\n' "$GITHUB_SHA" > REVISION
+          tar -czf release.tar.gz app scripts deploy tests requirements.txt README.md REVISION
+
+      - name: Configure restricted SSH access
+        env:
+          PROD_SSH_PRIVATE_KEY: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+          PROD_SSH_KNOWN_HOSTS: ${{ secrets.PROD_SSH_KNOWN_HOSTS }}
+        run: |
+          test -n "$PROD_SSH_PRIVATE_KEY"
+          test -n "$PROD_SSH_KNOWN_HOSTS"
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$PROD_SSH_PRIVATE_KEY" > ~/.ssh/calendar_bot_deploy
+          printf '%s\n' "$PROD_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/calendar_bot_deploy ~/.ssh/known_hosts
+
+      - name: Deploy to VPS
+        env:
+          PROD_SSH_HOST: ${{ secrets.PROD_SSH_HOST }}
+          PROD_SSH_USER: ${{ secrets.PROD_SSH_USER }}
+        run: |
+          test -n "$PROD_SSH_HOST"
+          test -n "$PROD_SSH_USER"
+          cat release.tar.gz | ssh \
+            -i ~/.ssh/calendar_bot_deploy \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
+            "$PROD_SSH_USER@$PROD_SSH_HOST"
