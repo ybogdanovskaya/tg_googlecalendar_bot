@@ -34,7 +34,7 @@
 - [x] В Environment добавлены только ограниченные secrets из [CI/CD инструкции](../../CI_CD_инструкция.md): `PROD_SSH_HOST`, `PROD_SSH_USER`, `PROD_SSH_PRIVATE_KEY`, `PROD_SSH_KNOWN_HOSTS`.
 - [x] Для Environment назначен required reviewer — владелец.
 - [x] Для `main` включена защита: merge только через pull request и обязательный успешный workflow `CI`.
-- [ ] Отдельно утверждён и реализован production-маршрут Mini App: статический bundle, ASGI API, Nginx reverse proxy и запуск службы на loopback.
+- [x] Отдельно утверждён production-проект Mini App: статический bundle, ASGI API, Nginx reverse proxy и запуск службы на loopback. Реализация ещё не начата; подробности — в [этапе 8.1](ЭТАП_8_1_PRODUCTION_МАРШРУТ.md).
 - [ ] Production-схема и обратно совместимые миграции проверены на свежей копии рабочей базы с backup и rollback rehearsal.
 - [x] Выполнен end-to-end CD безопасной текущей версии рабочего бота через ограниченный deploy key.
 - [ ] Обновлён внешний паспорт VPS после подтверждённой production-конфигурации.
@@ -107,3 +107,4 @@ P1 завершён. Следующее действие — отдельное 
 - 2026-08-09: для `main` включены pull request, обязательные checks `Python checks` и `Mini App checks`, актуальность ветки перед merge, обязательное разрешение обсуждений, запрет force-push и удаления ветки. Второй reviewer не требуется для личного проекта.
 - 2026-08-09: владелец добавил в Environment четыре ограниченных SSH secrets: `PROD_SSH_HOST`, `PROD_SSH_USER`, `PROD_SSH_PRIVATE_KEY`, `PROD_SSH_KNOWN_HOSTS`. Проверены только имена и количество; значения не читались и не сохранялись в Git.
 - 2026-08-09: end-to-end CD рабочего бота успешно завершён из `main` после отдельного ручного approval владельца в Environment. Проверены revision `c84d1be`, активность рабочего бота и preview, штатный health-check и preview health endpoint. Mini App в production не выпускалась.
+- 2026-08-09: владелец подтвердил Telegram-only режим. P2.1 завершён: проект production-маршрута задокументирован; в ходе read-only проверки выявлено, что production DNS и Nginx site Mini App ещё не существуют. Никакие production-изменения не выполнялись.
