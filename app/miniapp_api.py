@@ -713,7 +713,8 @@ def create_app(
             start, end = datetime.fromisoformat(from_date).date(), datetime.fromisoformat(to_date).date()
         except ValueError as exc:
             raise ApiError(422, "VALIDATION_ERROR", "Укажите корректный период календаря.") from exc
-        if end < start or (end - start).days > 62:
+        rules = await asyncio.to_thread(service.rules)
+        if end < start or (end - start).days >= rules.booking_horizon_days:
             raise ApiError(422, "VALIDATION_ERROR", "Период календаря недопустим.")
         return await asyncio.to_thread(service.calendar_dates, start, end)
 

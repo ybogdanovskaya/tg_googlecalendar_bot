@@ -65,7 +65,7 @@ class MiniAppApiTests(unittest.IsolatedAsyncioTestCase):
             log_path=Path(self.temporary.name) / "miniapp.jsonl",
             timezone="Europe/Moscow",
             min_lead_minutes=120,
-            booking_horizon_days=30,
+            booking_horizon_days=90,
             hold_hours=24,
             privacy_policy_version="test-v1",
         )
@@ -211,6 +211,22 @@ class MiniAppApiTests(unittest.IsolatedAsyncioTestCase):
             payload = client.get("/api/v1/requests").json()
         self.assertEqual([item["id"] for item in payload["items"]], [str(active.id)])
         self.assertEqual([item["id"] for item in payload["archive"]], [str(archived.id)])
+
+    def test_calendar_allows_the_confirmed_ninety_day_horizon(self) -> None:
+        today = datetime.now(ZoneInfo("Europe/Moscow")).date()
+        app = create_app(self.settings, self.database, FreeCalendar(), cookie_secure=False)
+        with TestClient(app) as client:
+            client.post("/api/v1/auth/telegram", json={"init_data": self._signed_init_data(100)})
+            allowed = client.get(
+                "/api/v1/booking/calendar",
+                params={"from_date": today.isoformat(), "to_date": (today + timedelta(days=89)).isoformat()},
+            )
+            too_long = client.get(
+                "/api/v1/booking/calendar",
+                params={"from_date": today.isoformat(), "to_date": (today + timedelta(days=90)).isoformat()},
+            )
+        self.assertEqual(allowed.status_code, 200)
+        self.assertEqual(too_long.status_code, 422)
 
     def test_admin_routes_require_server_side_admin_role(self) -> None:
         app = create_app(self.settings, self.database, FreeCalendar(), cookie_secure=False)
