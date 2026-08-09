@@ -128,6 +128,7 @@ class AdminAllDayEventBody(BaseModel):
     location: str | None = Field(default=None, max_length=1000)
     start_date: date
     end_date: date
+    blocks_calendar: bool = True
 
 
 class AdminRequestPatchBody(BaseModel):
@@ -230,6 +231,7 @@ def request_view(value: MeetingRequest, timezone_name: str, open_change: ChangeR
         "start_at": value.start_at.astimezone(zone).isoformat(), "end_at": value.end_at.astimezone(zone).isoformat(),
         "duration_minutes": int((value.end_at - value.start_at).total_seconds() // 60),
         "all_day": value.all_day,
+        "blocks_calendar": value.blocks_calendar,
         "status": value.status, "status_label": labels.get(value.status, "Обновляется"),
         "reservation": {"active": value.status == PENDING and value.hold_until > now, "until": value.hold_until.astimezone(zone).isoformat()},
         "allowed_actions": actions, "open_change": change_view(open_change, timezone_name) if open_change else None,
@@ -569,6 +571,7 @@ def create_app(
                 location=body.location,
                 start_date=body.start_date,
                 end_date=body.end_date,
+                blocks_calendar=body.blocks_calendar,
             )
         except BookingValidationError as exc:
             raise ApiError(422, "VALIDATION_ERROR", "Проверьте тему и диапазон дат события.") from exc

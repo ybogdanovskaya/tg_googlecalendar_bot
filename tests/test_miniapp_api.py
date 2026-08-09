@@ -385,7 +385,7 @@ class MiniAppApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cancelled.status_code, 200)
             self.assertEqual(cancelled.json()["status"], "CANCELLED_BY_ADMIN")
 
-    def test_admin_can_create_all_day_blocking_event(self) -> None:
+    def test_admin_can_create_all_day_event_with_optional_calendar_block(self) -> None:
         today = datetime.now(ZoneInfo("Europe/Moscow")).date()
         app = create_app(self.settings, self.database, FreeCalendar(), cookie_secure=False)
         with TestClient(app) as client:
@@ -413,6 +413,23 @@ class MiniAppApiTests(unittest.IsolatedAsyncioTestCase):
                 ).status_code,
                 200,
             )
+            nonblocking = client.post(
+                "/api/v1/admin/all-day-events",
+                json={
+                    "subject": "Каникулы детей",
+                    "start_date": (today + timedelta(days=10)).isoformat(),
+                    "end_date": (today + timedelta(days=11)).isoformat(),
+                    "blocks_calendar": False,
+                },
+                headers={"X-CSRF-Token": csrf, "Idempotency-Key": "c" * 24},
+            )
+            self.assertEqual(nonblocking.status_code, 200)
+            self.assertTrue(nonblocking.json()["all_day"])
+            self.assertFalse(nonblocking.json()["blocks_calendar"])
+            self.assertFalse(self.database.active_intervals(
+                datetime.combine(today + timedelta(days=10), clock_time(10, 0), ZoneInfo("Europe/Moscow")).astimezone(ZoneInfo("UTC")),
+                datetime.combine(today + timedelta(days=10), clock_time(11, 0), ZoneInfo("Europe/Moscow")).astimezone(ZoneInfo("UTC")),
+            ))
 
     def test_admin_can_create_and_cancel_series(self) -> None:
         zone = ZoneInfo("Europe/Moscow")

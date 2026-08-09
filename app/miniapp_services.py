@@ -346,6 +346,7 @@ class MiniAppBookingService:
         location: str | None,
         start_date: date,
         end_date: date,
+        blocks_calendar: bool,
     ) -> MeetingRequest:
         """Create an inclusive, owner-only all-day calendar block."""
         local_today = datetime.now(ZoneInfo(self.settings.timezone)).date()
@@ -370,7 +371,7 @@ class MiniAppBookingService:
             location=location.strip() if location and location.strip() else None,
             start_at=start_utc,
             end_at=end_utc,
-            blocks_calendar=True,
+            blocks_calendar=blocks_calendar,
             allow_overlap=True,
             all_day=True,
         )
