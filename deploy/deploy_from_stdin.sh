@@ -9,7 +9,8 @@ SERVICE="calendar-bot.service"
 HEALTH_SERVICE="calendar-bot-health.service"
 MINIAPP_SERVICE="calendar-miniapp.service"
 STATIC_DIR="${APP_DIR}/miniapp-static"
-PYTHON="${APP_DIR}/.venv/bin/python"
+ACTIVE_VENV="${APP_DIR}/.venv"
+PYTHON="${ACTIVE_VENV}/bin/python"
 LOCK_FILE="/run/lock/calendar-bot-deploy.lock"
 MAX_ARCHIVE_BYTES=$((20 * 1024 * 1024))
 
@@ -30,6 +31,9 @@ DB_BACKUP=""
 MINIAPP_SERVICE_PRESENT=false
 MINIAPP_WAS_ACTIVE=false
 STATIC_NEXT=""
+VENV_NEXT=""
+PREVIOUS_VENV=""
+REQUIREMENTS_CHANGED=false
 
 service_exists() {
     systemctl cat "$1" >/dev/null 2>&1
@@ -39,7 +43,23 @@ cleanup() {
     if [[ -n "${STATIC_NEXT}" && -d "${STATIC_NEXT}" ]]; then
         rm -rf -- "${STATIC_NEXT}"
     fi
+    if [[ -n "${VENV_NEXT}" && -d "${VENV_NEXT}" ]]; then
+        rm -rf -- "${VENV_NEXT}"
+    fi
     rm -rf -- "${STAGE_DIR}"
+}
+
+restore_previous_venv() {
+    if [[ -n "${PREVIOUS_VENV}" && -d "${PREVIOUS_VENV}" ]]; then
+        rm -rf -- "${ACTIVE_VENV}"
+        mv "${PREVIOUS_VENV}" "${ACTIVE_VENV}"
+        PREVIOUS_VENV=""
+    fi
+    if [[ -n "${VENV_NEXT}" && -d "${VENV_NEXT}" ]]; then
+        rm -rf -- "${VENV_NEXT}"
+        VENV_NEXT=""
+    fi
+    PYTHON="${ACTIVE_VENV}/bin/python"
 }
 
 restore_previous_release() {
@@ -62,6 +82,7 @@ restore_previous_release() {
         chown -R root:root "${STATIC_DIR}"
         chmod -R a+rX "${STATIC_DIR}"
     fi
+    restore_previous_venv
     if [[ -n "${DB_BACKUP}" && -f "${DB_BACKUP}" ]]; then
         runuser -u calendarbot -- env PYTHONPATH="${APP_DIR}" \
             "${PYTHON}" "${APP_DIR}/scripts/restore_backup.py" \
@@ -120,14 +141,25 @@ if [[ ! "${REVISION}" =~ ^[0-9a-f]{40}$ ]]; then
     exit 1
 fi
 
+VERIFY_PYTHON="${PYTHON}"
 if ! cmp -s "${STAGE_DIR}/requirements.txt" "${APP_DIR}/requirements.txt"; then
-    echo "deploy_failed reason=requirements_changed_manual_dependency_update_required"
-    exit 1
+    REQUIREMENTS_CHANGED=true
+    VENV_NEXT="${APP_DIR}/.venv.next-${STAMP}"
+    if [[ -e "${VENV_NEXT}" ]]; then
+        echo "deploy_failed reason=next_venv_already_exists"
+        exit 1
+    fi
+    runuser -u calendarbot -- "${PYTHON}" -m venv "${VENV_NEXT}"
+    VERIFY_PYTHON="${VENV_NEXT}/bin/python"
+    runuser -u calendarbot -- "${VERIFY_PYTHON}" -m pip install \
+        --disable-pip-version-check --no-input -r "${STAGE_DIR}/requirements.txt"
+    "${VERIFY_PYTHON}" -m pip check
+    echo "deploy_dependency_candidate_ready path=${VENV_NEXT}"
 fi
 
-env PYTHONPATH="${STAGE_DIR}" "${PYTHON}" -m compileall -q \
+env PYTHONPATH="${STAGE_DIR}" "${VERIFY_PYTHON}" -m compileall -q \
     "${STAGE_DIR}/app" "${STAGE_DIR}/scripts" "${STAGE_DIR}/tests"
-env PYTHONPATH="${STAGE_DIR}" "${PYTHON}" -m unittest discover \
+env PYTHONPATH="${STAGE_DIR}" "${VERIFY_PYTHON}" -m unittest discover \
     -s "${STAGE_DIR}/tests"
 
 if service_exists "${MINIAPP_SERVICE}"; then
@@ -173,6 +205,19 @@ install -o calendarbot -g calendarbot -m 0644 \
     "${STAGE_DIR}/REVISION" "${APP_DIR}/REVISION"
 chown -R calendarbot:calendarbot "${APP_DIR}/app" "${APP_DIR}/scripts" "${APP_DIR}/deploy"
 
+if [[ "${REQUIREMENTS_CHANGED}" == "true" ]]; then
+    PREVIOUS_VENV="${APP_DIR}/.venv.previous-${STAMP}"
+    if [[ -e "${PREVIOUS_VENV}" ]]; then
+        echo "deploy_failed reason=previous_venv_already_exists"
+        exit 1
+    fi
+    mv "${ACTIVE_VENV}" "${PREVIOUS_VENV}"
+    mv "${VENV_NEXT}" "${ACTIVE_VENV}"
+    VENV_NEXT=""
+    PYTHON="${ACTIVE_VENV}/bin/python"
+    echo "deploy_dependency_switched previous_venv=${PREVIOUS_VENV}"
+fi
+
 STATIC_NEXT="$(mktemp -d "${APP_DIR}/.miniapp-static.${STAMP}.XXXXXX")"
 cp -a "${STAGE_DIR}/miniapp/dist/." "${STATIC_NEXT}/"
 chown -R root:root "${STATIC_NEXT}"
@@ -194,4 +239,4 @@ fi
 systemctl start "${HEALTH_SERVICE}"
 
 trap - ERR
-echo "deploy_ok revision=${REVISION} database_backup=${DB_BACKUP} code_backup=${CODE_BACKUP}"
+echo "deploy_ok revision=${REVISION} database_backup=${DB_BACKUP} code_backup=${CODE_BACKUP} previous_venv=${PREVIOUS_VENV:-none}"
