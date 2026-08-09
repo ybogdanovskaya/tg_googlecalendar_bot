@@ -855,9 +855,15 @@ def create_app(
 
 def load_local_env(path: Path = Path(".env")) -> None:
     """Loads an ignored local .env without overriding real environment variables."""
-    if not path.exists():
+    try:
+        if not path.exists():
+            return
+        contents = path.read_text(encoding="utf-8")
+    except OSError:
+        # Production settings are supplied by systemd EnvironmentFile.  A local
+        # developer .env is optional and may be outside the service user's ACL.
         return
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in contents.splitlines():
         if not line or line.lstrip().startswith("#") or "=" not in line:
             continue
         name, value = line.split("=", 1)

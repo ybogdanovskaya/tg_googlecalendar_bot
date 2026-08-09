@@ -9,13 +9,14 @@ import unittest
 from datetime import datetime, time as clock_time, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.db import Database
-from app.miniapp_api import ApiError, create_app, validate_telegram_init_data
+from app.miniapp_api import ApiError, create_app, load_local_env, validate_telegram_init_data
 from app.miniapp_services import MiniAppBookingService
 from app.models import CHANGE_CANCEL
 from app.release_d_store import DELETE_COMPLETED, DELETE_KEEP_FUTURE
@@ -76,6 +77,10 @@ class MiniAppApiTests(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_local_env_loader_ignores_inaccessible_developer_file(self) -> None:
+        with patch.object(Path, "exists", side_effect=PermissionError):
+            load_local_env(Path(".env"))
 
     def _signed_init_data(self, telegram_id: int = 100) -> str:
         values = {
