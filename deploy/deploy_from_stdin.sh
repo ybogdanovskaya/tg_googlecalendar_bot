@@ -34,6 +34,8 @@ STATIC_NEXT=""
 VENV_NEXT=""
 PREVIOUS_VENV=""
 REQUIREMENTS_CHANGED=false
+RELEASE_HAS_DEPLOY=false
+RELEASE_HAS_MINIAPP_ASSETS=false
 
 service_exists() {
     systemctl cat "$1" >/dev/null 2>&1
@@ -128,12 +130,18 @@ if find "${STAGE_DIR}" -type l -print -quit | grep -q .; then
     exit 1
 fi
 
-for required in app scripts deploy tests miniapp/dist/index.html requirements.txt README.md REVISION; do
+for required in app scripts tests requirements.txt README.md REVISION; do
     if [[ ! -e "${STAGE_DIR}/${required}" ]]; then
         echo "deploy_failed reason=missing_release_item item=${required}"
         exit 1
     fi
 done
+if [[ -d "${STAGE_DIR}/deploy" ]]; then
+    RELEASE_HAS_DEPLOY=true
+fi
+if [[ -f "${STAGE_DIR}/miniapp/dist/index.html" ]]; then
+    RELEASE_HAS_MINIAPP_ASSETS=true
+fi
 
 REVISION="$(tr -d '[:space:]' < "${STAGE_DIR}/REVISION")"
 if [[ ! "${REVISION}" =~ ^[0-9a-f]{40}$ ]]; then
@@ -193,17 +201,23 @@ DB_BACKUP="$(runuser -u calendarbot -- "${PYTHON}" "${APP_DIR}/scripts/backup.py
     --destination "${BACKUP_DIR}" \
     --keep-days 30)"
 
-rm -rf -- "${APP_DIR}/app" "${APP_DIR}/scripts" "${APP_DIR}/deploy"
+rm -rf -- "${APP_DIR}/app" "${APP_DIR}/scripts"
 cp -a "${STAGE_DIR}/app" "${APP_DIR}/app"
 cp -a "${STAGE_DIR}/scripts" "${APP_DIR}/scripts"
-cp -a "${STAGE_DIR}/deploy" "${APP_DIR}/deploy"
+if [[ "${RELEASE_HAS_DEPLOY}" == "true" ]]; then
+    rm -rf -- "${APP_DIR}/deploy"
+    cp -a "${STAGE_DIR}/deploy" "${APP_DIR}/deploy"
+fi
 install -o calendarbot -g calendarbot -m 0644 \
     "${STAGE_DIR}/requirements.txt" "${APP_DIR}/requirements.txt"
 install -o calendarbot -g calendarbot -m 0644 \
     "${STAGE_DIR}/README.md" "${APP_DIR}/README.md"
 install -o calendarbot -g calendarbot -m 0644 \
     "${STAGE_DIR}/REVISION" "${APP_DIR}/REVISION"
-chown -R calendarbot:calendarbot "${APP_DIR}/app" "${APP_DIR}/scripts" "${APP_DIR}/deploy"
+chown -R calendarbot:calendarbot "${APP_DIR}/app" "${APP_DIR}/scripts"
+if [[ "${RELEASE_HAS_DEPLOY}" == "true" ]]; then
+    chown -R calendarbot:calendarbot "${APP_DIR}/deploy"
+fi
 
 if [[ "${REQUIREMENTS_CHANGED}" == "true" ]]; then
     PREVIOUS_VENV="${APP_DIR}/.venv.previous-${STAMP}"
@@ -218,15 +232,17 @@ if [[ "${REQUIREMENTS_CHANGED}" == "true" ]]; then
     echo "deploy_dependency_switched previous_venv=${PREVIOUS_VENV}"
 fi
 
-STATIC_NEXT="$(mktemp -d "${APP_DIR}/.miniapp-static.${STAMP}.XXXXXX")"
-cp -a "${STAGE_DIR}/miniapp/dist/." "${STATIC_NEXT}/"
-chown -R root:root "${STATIC_NEXT}"
-chmod -R a+rX "${STATIC_NEXT}"
-if [[ -d "${STATIC_DIR}" ]]; then
-    mv "${STATIC_DIR}" "${BACKUP_DIR}/calendar-miniapp-static_${STAMP}"
+if [[ "${RELEASE_HAS_MINIAPP_ASSETS}" == "true" ]]; then
+    STATIC_NEXT="$(mktemp -d "${APP_DIR}/.miniapp-static.${STAMP}.XXXXXX")"
+    cp -a "${STAGE_DIR}/miniapp/dist/." "${STATIC_NEXT}/"
+    chown -R root:root "${STATIC_NEXT}"
+    chmod -R a+rX "${STATIC_NEXT}"
+    if [[ -d "${STATIC_DIR}" ]]; then
+        mv "${STATIC_DIR}" "${BACKUP_DIR}/calendar-miniapp-static_${STAMP}"
+    fi
+    mv "${STATIC_NEXT}" "${STATIC_DIR}"
+    STATIC_NEXT=""
 fi
-mv "${STATIC_NEXT}" "${STATIC_DIR}"
-STATIC_NEXT=""
 
 systemctl start "${SERVICE}"
 sleep 5
@@ -239,4 +255,4 @@ fi
 systemctl start "${HEALTH_SERVICE}"
 
 trap - ERR
-echo "deploy_ok revision=${REVISION} database_backup=${DB_BACKUP} code_backup=${CODE_BACKUP} previous_venv=${PREVIOUS_VENV:-none}"
+echo "deploy_ok revision=${REVISION} database_backup=${DB_BACKUP} code_backup=${CODE_BACKUP} previous_venv=${PREVIOUS_VENV:-none} miniapp_assets=${RELEASE_HAS_MINIAPP_ASSETS}"
