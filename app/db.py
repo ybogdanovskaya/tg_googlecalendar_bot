@@ -973,6 +973,17 @@ class Database:
             ).fetchall()
         return [self._row_to_change(row) for row in rows]
 
+    def list_open_changes_for_requests(self, request_ids: list[int]) -> dict[int, ChangeRequest]:
+        if not request_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in request_ids)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM change_requests WHERE request_id IN ({placeholders}) AND status IN (?, ?)",
+                (*request_ids, CHANGE_PENDING, CHANGE_APPROVING),
+            ).fetchall()
+        return {int(row["request_id"]): self._row_to_change(row) for row in rows}
+
     def claim_change(self, change_id: int, admin_id: int) -> ChangeRequest | None:
         now = _iso(datetime.now(UTC))
         with self._connect() as connection:

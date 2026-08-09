@@ -200,7 +200,7 @@ def validate_telegram_init_data(raw: str, bot_token: str, max_age_seconds: int =
     return user
 
 
-def request_view(value: MeetingRequest, timezone_name: str) -> dict[str, Any]:
+def request_view(value: MeetingRequest, timezone_name: str, open_change: ChangeRequest | None = None) -> dict[str, Any]:
     zone = ZoneInfo(timezone_name)
     labels = {
         PENDING: "На согласовании",
@@ -214,7 +214,7 @@ def request_view(value: MeetingRequest, timezone_name: str) -> dict[str, Any]:
     actions: list[str] = []
     if value.status == PENDING:
         actions = ["EDIT", "CANCEL"]
-    elif value.status == APPROVED and value.end_at > now:
+    elif value.status == APPROVED and value.end_at > now and open_change is None:
         actions = ["REQUEST_RESCHEDULE", "REQUEST_CANCEL"]
     return {
         "id": str(value.id), "subject": value.subject, "description": value.description, "location": value.location,
@@ -223,7 +223,8 @@ def request_view(value: MeetingRequest, timezone_name: str) -> dict[str, Any]:
         "duration_minutes": int((value.end_at - value.start_at).total_seconds() // 60),
         "status": value.status, "status_label": labels.get(value.status, "Обновляется"),
         "reservation": {"active": value.status == PENDING and value.hold_until > now, "until": value.hold_until.astimezone(zone).isoformat()},
-        "allowed_actions": actions, "created_at": value.created_at.astimezone(zone).isoformat(), "updated_at": value.updated_at.astimezone(zone).isoformat(),
+        "allowed_actions": actions, "open_change": change_view(open_change, timezone_name) if open_change else None,
+        "created_at": value.created_at.astimezone(zone).isoformat(), "updated_at": value.updated_at.astimezone(zone).isoformat(),
     }
 
 
@@ -728,14 +729,16 @@ def create_app(
     @app.get("/api/v1/requests")
     async def list_requests(current: Actor = Depends(actor)) -> dict[str, Any]:
         items = await asyncio.to_thread(database.list_user_requests, current.telegram_id, 100)
-        return {"items": [request_view(item, settings.timezone) for item in items]}
+        open_changes = await asyncio.to_thread(database.list_open_changes_for_requests, [item.id for item in items])
+        return {"items": [request_view(item, settings.timezone, open_changes.get(item.id)) for item in items]}
 
     @app.get("/api/v1/requests/{request_id}")
     async def get_request(request_id: int, current: Actor = Depends(actor)) -> dict[str, Any]:
         value = await asyncio.to_thread(database.get_request, request_id)
         if value is None or value.telegram_id != current.telegram_id:
             raise ApiError(404, "NOT_FOUND", "Заявка не найдена.")
-        return request_view(value, settings.timezone)
+        open_change = (await asyncio.to_thread(database.list_open_changes_for_requests, [value.id])).get(value.id)
+        return request_view(value, settings.timezone, open_change)
 
     @app.post("/api/v1/requests")
     async def create_request(body: RequestCreateBody, current: Actor = Depends(mutation_actor), key: str = Depends(idempotency_key)) -> JSONResponse:

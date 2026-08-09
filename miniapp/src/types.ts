@@ -41,6 +41,7 @@ export interface MeetingRequest {
   status_label: string;
   reservation: { active: boolean; until: string };
   allowed_actions: string[];
+  open_change: ChangeRequest | null;
   created_at: string;
   updated_at: string;
 }

@@ -473,6 +473,13 @@ class MiniAppApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(changed.status_code, 200)
             self.assertEqual(changed.json()["change_type"], "RESCHEDULE")
 
+            listed = client.get("/api/v1/requests")
+            self.assertEqual(listed.status_code, 200)
+            item = listed.json()["items"][0]
+            self.assertEqual(item["open_change"]["change_type"], "RESCHEDULE")
+            self.assertEqual(item["open_change"]["status"], "PENDING")
+            self.assertEqual(item["allowed_actions"], [])
+
             created = client.post(
                 "/api/v1/deletion-requests",
                 json={"mode": DELETE_KEEP_FUTURE},
