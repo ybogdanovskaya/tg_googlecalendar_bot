@@ -432,9 +432,10 @@ class AutomationStore:
             self._cancel_jobs_for_request(connection, request_id, _iso(current), JOB_MEETING_REMINDER)
             count = 0
             if request and request.status == APPROVED and request.start_at > current:
+                scheduled_minutes = (1440,) if request.all_day else reminder_minutes
                 recipients = {request.telegram_id, admin_id}
                 for recipient in recipients:
-                    for minutes in reminder_minutes:
+                    for minutes in scheduled_minutes:
                         due = request.start_at - timedelta(minutes=int(minutes))
                         if due < current:
                             due = current

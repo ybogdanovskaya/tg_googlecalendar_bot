@@ -221,7 +221,9 @@ def request_view(value: MeetingRequest, timezone_name: str, open_change: ChangeR
     }
     now = datetime.now(UTC)
     actions: list[str] = []
-    if value.status == PENDING:
+    if value.all_day:
+        actions = []
+    elif value.status == PENDING:
         actions = ["EDIT", "CANCEL"]
     elif value.status == APPROVED and value.end_at > now and open_change is None:
         actions = ["REQUEST_RESCHEDULE", "REQUEST_CANCEL"]

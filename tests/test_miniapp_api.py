@@ -401,7 +401,14 @@ class MiniAppApiTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(created.status_code, 200)
             self.assertTrue(created.json()["all_day"])
+            self.assertEqual(created.json()["allowed_actions"], [])
             self.assertEqual(created.json()["duration_minutes"], 4 * 24 * 60)
+            with self.database._connect() as connection:
+                scheduled = connection.execute(
+                    "SELECT COUNT(*) FROM scheduled_jobs WHERE request_id = ? AND job_type = 'MEETING_REMINDER'",
+                    (created.json()["id"],),
+                ).fetchone()[0]
+            self.assertEqual(scheduled, 1)
             self.assertTrue(self.database.active_intervals(
                 datetime.combine(today + timedelta(days=6), clock_time(10, 0), ZoneInfo("Europe/Moscow")).astimezone(ZoneInfo("UTC")),
                 datetime.combine(today + timedelta(days=6), clock_time(11, 0), ZoneInfo("Europe/Moscow")).astimezone(ZoneInfo("UTC")),

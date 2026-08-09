@@ -188,7 +188,7 @@ class MiniAppBookingService:
     ) -> MeetingRequest:
         self.ensure_consent(telegram_id)
         request = await asyncio.to_thread(self.database.get_request, request_id)
-        if request is None or request.telegram_id != telegram_id:
+        if request is None or request.telegram_id != telegram_id or request.all_day:
             raise RequestNotEditableError("request is unavailable")
         updated = request
         if changes:
@@ -377,7 +377,18 @@ class MiniAppBookingService:
         )
         try:
             event_id = await self.calendar.create_event(draft)
-            return await asyncio.to_thread(self.database.complete_approval, draft.id, admin_id, event_id)
+            created = await asyncio.to_thread(self.database.complete_approval, draft.id, admin_id, event_id)
+            try:
+                notification_rules = await asyncio.to_thread(load_notification_rules, self.database, self.settings)
+                await asyncio.to_thread(
+                    self.automation.rebuild_request_reminders,
+                    created.id,
+                    self.settings.admin_telegram_id,
+                    notification_rules.reminder_minutes,
+                )
+            except Exception:
+                LOGGER.exception("miniapp_all_day_event_reminder_schedule_failed", extra={"request_id": created.id})
+            return created
         except Exception as exc:
             await asyncio.to_thread(self.database.fail_admin_draft, draft.id, type(exc).__name__)
             raise CalendarUnavailable("all-day event creation failed") from exc
@@ -633,6 +644,9 @@ class MiniAppBookingService:
         start_at: datetime | None,
         duration_minutes: int | None,
     ) -> ChangeRequest:
+        request = await asyncio.to_thread(self.database.get_request, request_id)
+        if request is None or request.telegram_id != telegram_id or request.all_day:
+            raise RequestNotEditableError("request is unavailable")
         if change_type == CHANGE_CANCEL:
             if start_at is not None or duration_minutes is not None:
                 raise BookingValidationError("cancel change cannot include a slot")
