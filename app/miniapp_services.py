@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from app.booking_rules import BookingRules, load_rules
+from app.booking_rules import BookingRules, is_closed_date, load_rules
 from app.automation_store import AutomationStore
 from app.calendar_client import CalendarClient, CalendarUnavailable
 from app.config import Settings
@@ -82,12 +82,15 @@ class MiniAppBookingService:
             (allowed_from + timedelta(days=offset)).isoformat()
             for offset in range((allowed_to - allowed_from).days + 1)
         ]
-        return {"available_dates": [item for item in dates if item not in closed], "closed_dates": [item for item in dates if item in closed]}
+        return {
+            "available_dates": [item for item in dates if not is_closed_date(date.fromisoformat(item), closed, rules)],
+            "closed_dates": [item for item in dates if is_closed_date(date.fromisoformat(item), closed, rules)],
+        }
 
     async def slots(self, selected_date: date, duration_minutes: int) -> SlotResult:
         rules = self.rules()
         self._validate_date_and_duration(selected_date, duration_minutes, rules)
-        if selected_date.isoformat() in set(self.database.list_closed_dates(selected_date.isoformat(), 1)):
+        if is_closed_date(selected_date, set(self.database.list_closed_dates(selected_date.isoformat(), 1)), rules):
             return SlotResult((), {})
         day_start = datetime.combine(selected_date, time.min, self.zone)
         day_end = day_start + timedelta(days=1)
@@ -159,6 +162,11 @@ class MiniAppBookingService:
         if not replayed:
             try:
                 notification_rules = await asyncio.to_thread(load_notification_rules, self.database, self.settings)
+                await asyncio.to_thread(
+                    self.automation.ensure_new_request_notification,
+                    request.id,
+                    self.settings.admin_telegram_id,
+                )
                 await asyncio.to_thread(
                     self.automation.ensure_pending_reminder,
                     request.id,
@@ -625,7 +633,12 @@ class MiniAppBookingService:
         today = datetime.now(self.zone).date()
         if not rules.booking_enabled or duration_minutes not in rules.durations:
             raise BookingValidationError("booking settings do not allow this duration")
-        if selected_date < today or selected_date >= today + timedelta(days=rules.booking_horizon_days):
+        closed = set(self.database.list_closed_dates(selected_date.isoformat(), 1))
+        if (
+            selected_date < today
+            or selected_date >= today + timedelta(days=rules.booking_horizon_days)
+            or is_closed_date(selected_date, closed, rules)
+        ):
             raise BookingValidationError("date is outside booking horizon")
 
     def _validate_slot(self, start_at: datetime, duration_minutes: int, rules: BookingRules) -> tuple[datetime, datetime]:
@@ -641,7 +654,6 @@ class MiniAppBookingService:
             minute < rules.user_booking_start_minutes
             or minute + duration_minutes > rules.user_booking_end_minutes
             or local_start < datetime.now(self.zone) + timedelta(minutes=rules.min_lead_minutes)
-            or local_start.date().isoformat() in set(self.database.list_closed_dates(local_start.date().isoformat(), 1))
         ):
             raise BookingValidationError("slot is outside booking rules")
         return local_start.astimezone(UTC), local_end.astimezone(UTC)
@@ -652,7 +664,7 @@ class MiniAppBookingService:
 
     @staticmethod
     def _validate_request_fields(name: str, email: str, subject: str, description: str | None, location: str | None) -> None:
-        if not name.strip() or len(name.strip()) > 120:
+        if not name.strip() or "@" in name.strip() or len(name.strip()) > 120:
             raise BookingValidationError("invalid name")
         if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email.strip()) or len(email.strip()) > 254:
             raise BookingValidationError("invalid email")

@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.apps_script_calendar import AppsScriptCalendar
-from app.booking_rules import BOOKING_ENABLED, BOOKING_HORIZON_DAYS, DURATIONS, HOLD_HOURS, MIN_LEAD_MINUTES, STEP_MINUTES, USER_BOOKING_WINDOW, validate_value as validate_booking_setting
+from app.booking_rules import BOOKING_ENABLED, BOOKING_HORIZON_DAYS, CLOSED_WEEKDAYS, DURATIONS, HOLD_HOURS, MIN_LEAD_MINUTES, STEP_MINUTES, USER_BOOKING_WINDOW, validate_value as validate_booking_setting
 from app.calendar_client import CalendarClient, CalendarUnavailable
 from app.config import Settings
 from app.db import Database
@@ -648,13 +648,13 @@ def create_app(
         rules = await asyncio.to_thread(service.rules)
         notifications = await asyncio.to_thread(load_notification_rules, database, settings)
         return {
-            "booking": {"booking_enabled": rules.booking_enabled, "min_lead_minutes": rules.min_lead_minutes, "booking_horizon_days": rules.booking_horizon_days, "hold_hours": rules.hold_hours, "durations": list(rules.durations), "step_minutes": rules.step_minutes, "user_booking_window": [rules.user_booking_start_minutes, rules.user_booking_end_minutes]},
+            "booking": {"booking_enabled": rules.booking_enabled, "min_lead_minutes": rules.min_lead_minutes, "booking_horizon_days": rules.booking_horizon_days, "hold_hours": rules.hold_hours, "durations": list(rules.durations), "step_minutes": rules.step_minutes, "user_booking_window": [rules.user_booking_start_minutes, rules.user_booking_end_minutes], "closed_weekdays": list(rules.closed_weekdays)},
             "notifications": {"reminder_minutes": list(notifications.reminder_minutes), "pending_reminder_hours": notifications.pending_reminder_hours, "automation_enabled": notifications.automation_enabled},
         }
 
     @app.patch("/api/v1/admin/settings")
     async def admin_update_setting(body: AdminSettingBody, current: Actor = Depends(admin_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
-        booking_keys = {BOOKING_ENABLED, MIN_LEAD_MINUTES, BOOKING_HORIZON_DAYS, HOLD_HOURS, DURATIONS, STEP_MINUTES, USER_BOOKING_WINDOW}
+        booking_keys = {BOOKING_ENABLED, MIN_LEAD_MINUTES, BOOKING_HORIZON_DAYS, HOLD_HOURS, DURATIONS, STEP_MINUTES, USER_BOOKING_WINDOW, CLOSED_WEEKDAYS}
         notification_keys = {REMINDER_MINUTES, PENDING_REMINDER_HOURS, AUTOMATION_ENABLED}
         try:
             value = validate_booking_setting(body.key, body.value) if body.key in booking_keys else validate_notification_setting(body.key, body.value) if body.key in notification_keys else None
@@ -667,7 +667,8 @@ def create_app(
 
     @app.get("/api/v1/admin/closed-dates")
     async def admin_closed_dates(_: Actor = Depends(admin_reader)) -> dict[str, Any]:
-        return {"items": await asyncio.to_thread(database.list_closed_dates, None, 365)}
+        rules = await asyncio.to_thread(service.rules)
+        return {"items": await asyncio.to_thread(database.list_closed_dates, None, 365), "weekdays": list(rules.closed_weekdays)}
 
     @app.post("/api/v1/admin/closed-dates")
     async def admin_add_closed_date(body: ClosedDateBody, current: Actor = Depends(admin_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
@@ -730,7 +731,14 @@ def create_app(
     async def list_requests(current: Actor = Depends(actor)) -> dict[str, Any]:
         items = await asyncio.to_thread(database.list_user_requests, current.telegram_id, 100)
         open_changes = await asyncio.to_thread(database.list_open_changes_for_requests, [item.id for item in items])
-        return {"items": [request_view(item, settings.timezone, open_changes.get(item.id)) for item in items]}
+        now = datetime.now(UTC)
+        archived_statuses = {REJECTED, CANCELLED, CANCELLED_BY_ADMIN}
+        active = [item for item in items if item.status not in archived_statuses and item.end_at > now]
+        archive = [item for item in items if item not in active]
+        return {
+            "items": [request_view(item, settings.timezone, open_changes.get(item.id)) for item in active],
+            "archive": [request_view(item, settings.timezone, open_changes.get(item.id)) for item in archive],
+        }
 
     @app.get("/api/v1/requests/{request_id}")
     async def get_request(request_id: int, current: Actor = Depends(actor)) -> dict[str, Any]:

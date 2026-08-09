@@ -110,8 +110,8 @@ class DatabaseTests(unittest.TestCase):
 
     def test_schema_is_versioned(self) -> None:
         version, release = self.db.schema_info()
-        self.assertEqual(version, 6)
-        self.assertEqual(release, "release-d")
+        self.assertEqual(version, 7)
+        self.assertEqual(release, "miniapp-ux-2026-08")
 
     def test_miniapp_session_is_hashed_and_can_be_removed(self) -> None:
         token, csrf_token, _ = self.db.create_miniapp_session(100, ttl_seconds=60)

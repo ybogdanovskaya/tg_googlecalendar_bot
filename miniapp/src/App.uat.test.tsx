@@ -51,7 +51,7 @@ describe("локальный UAT экранов", () => {
 
     expect(await screen.findByRole("heading", { name: "Выберите удобное время для встречи" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Мои встречи/ }));
-    expect(await screen.findByText("Пока нет заявок на встречу.")).toBeInTheDocument();
+    expect(await screen.findByText("Пока нет актуальных заявок на встречу.")).toBeInTheDocument();
     expect(screen.queryByText("Управление календарём")).not.toBeInTheDocument();
   });
 

@@ -46,6 +46,11 @@ export interface MeetingRequest {
   updated_at: string;
 }
 
+export interface UserRequests {
+  items: MeetingRequest[];
+  archive: MeetingRequest[];
+}
+
 export interface RequestAlternative {
   id: string;
   start_at: string;
@@ -107,6 +112,7 @@ export interface AdminSettings {
     durations: number[];
     step_minutes: number;
     user_booking_window: number[];
+    closed_weekdays: number[];
   };
   notifications: {
     reminder_minutes: number[];

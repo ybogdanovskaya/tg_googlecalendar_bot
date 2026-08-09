@@ -66,7 +66,7 @@ class Settings:
             log_path=Path(os.getenv("LOG_PATH", "logs/calendar_bot.jsonl")),
             timezone=os.getenv("TIMEZONE", "Europe/Moscow"),
             min_lead_minutes=int(os.getenv("MIN_LEAD_MINUTES", "120")),
-            booking_horizon_days=int(os.getenv("BOOKING_HORIZON_DAYS", "30")),
+            booking_horizon_days=int(os.getenv("BOOKING_HORIZON_DAYS", "90")),
             hold_hours=int(os.getenv("HOLD_HOURS", "24")),
             privacy_policy_version=os.getenv("PRIVACY_POLICY_VERSION", "2026-08-07"),
         )

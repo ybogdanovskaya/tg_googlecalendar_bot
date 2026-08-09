@@ -17,6 +17,7 @@ from app.models import (
     JOB_DONE,
     JOB_FAILED,
     JOB_MEETING_REMINDER,
+    JOB_NEW_REQUEST_NOTIFICATION,
     JOB_PENDING,
     JOB_PENDING_REMINDER,
     JOB_PROCESSING,
@@ -511,6 +512,30 @@ class AutomationStore:
         key = f"pending:{request.id}:{due.isoformat()}:{admin_id}"
         with self.db._connect() as connection:
             return self._insert_job(connection, JOB_PENDING_REMINDER, request.id, None, admin_id, due, key, current)
+
+    def ensure_new_request_notification(
+        self,
+        request_id: int,
+        admin_id: int,
+        now: datetime | None = None,
+    ) -> int:
+        """Schedule one immediate, idempotent notification for a new request."""
+        current = now or datetime.now(UTC)
+        request = self.db.get_request(request_id)
+        if request is None or request.status != PENDING:
+            return 0
+        key = f"new-request:{request.id}:{admin_id}"
+        with self.db._connect() as connection:
+            return self._insert_job(
+                connection,
+                JOB_NEW_REQUEST_NOTIFICATION,
+                request.id,
+                None,
+                admin_id,
+                current,
+                key,
+                current,
+            )
 
     def schedule_next_pending_reminder(
         self,

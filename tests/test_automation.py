@@ -86,6 +86,21 @@ class AutomationTests(unittest.IsolatedAsyncioTestCase):
             pending = connection.execute("SELECT COUNT(*) FROM scheduled_jobs WHERE status = 'PENDING'").fetchone()[0]
         self.assertEqual(pending, 1)
 
+    async def test_new_pending_request_notification_is_delivered_once(self) -> None:
+        now = datetime.now(UTC)
+        request = self.db.create_request(
+            telegram_id=100, telegram_name="User", telegram_username=None,
+            email="user@example.com", subject="New request", description=None,
+            location=None, start_at=now + timedelta(days=2),
+            end_at=now + timedelta(days=2, minutes=30), hold_hours=24,
+        )
+        self.store.ensure_new_request_notification(request.id, 1, now)
+        bot = FakeBot()
+        self.assertEqual(await process_due_jobs(bot, self.store, self.settings, now), 1)
+        self.assertEqual(len(bot.sent), 1)
+        self.assertIn("Новая заявка", bot.sent[0][1])
+        self.assertEqual(await process_due_jobs(bot, self.store, self.settings, now), 0)
+
     async def test_reconciliation_updates_time_and_notifies_both_parties(self) -> None:
         start = datetime(2026, 8, 20, 9, 0, tzinfo=UTC)
         self.approved(start)

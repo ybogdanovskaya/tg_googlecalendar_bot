@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 LOGGER = logging.getLogger(__name__)
-RELEASE_ID = "release-d"
+RELEASE_ID = "miniapp-ux-2026-08"
 
 
 @dataclass(frozen=True)
@@ -348,6 +348,15 @@ MIGRATIONS = (
             CREATE INDEX IF NOT EXISTS idx_miniapp_idempotency_expiry
             ON miniapp_idempotency(expires_at)
             """,
+        ),
+    ),
+    Migration(
+        7,
+        "miniapp_booking_rules_defaults",
+        (
+            # The owner confirmed a unified 90-day booking horizon.  Preserve
+            # explicitly customized values while moving the old default (30).
+            "UPDATE app_settings SET value_json = '90' WHERE key = 'booking_horizon_days' AND value_json = '30'",
         ),
     ),
 )

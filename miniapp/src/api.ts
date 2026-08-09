@@ -13,7 +13,8 @@ import type {
   EventOccurrence,
   MeetingRequest,
   RequestAlternative,
-  SessionInfo
+  SessionInfo,
+  UserRequests
 } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "/api/v1";
@@ -73,9 +74,8 @@ export class CalendarApi {
     return this.request<BookingSlots>(`/booking/slots?date=${encodeURIComponent(date)}&duration_minutes=${durationMinutes}`);
   }
 
-  async requests(): Promise<MeetingRequest[]> {
-    const response = await this.request<{ items: MeetingRequest[] }>("/requests");
-    return response.items;
+  async requests(): Promise<UserRequests> {
+    return this.request<UserRequests>("/requests");
   }
 
   async createRequest(payload: {
@@ -241,9 +241,8 @@ export class CalendarApi {
     return this.request<{ key: string; value: unknown }>("/admin/settings", { method: "PATCH", body: { key, value }, mutation: true });
   }
 
-  async adminClosedDates(): Promise<string[]> {
-    const response = await this.request<{ items: string[] }>("/admin/closed-dates");
-    return response.items;
+  async adminClosedDates(): Promise<{ items: string[]; weekdays: number[] }> {
+    return this.request<{ items: string[]; weekdays: number[] }>("/admin/closed-dates");
   }
 
   async addAdminClosedDate(date: string): Promise<void> {

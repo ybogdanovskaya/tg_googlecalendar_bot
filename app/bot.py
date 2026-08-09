@@ -25,6 +25,7 @@ from app.booking_rules import (
     USER_BOOKING_WINDOW,
     BookingRules,
     format_clock_minutes,
+    is_closed_date,
     load_rules,
     parse_booking_window,
     validate_value,
@@ -274,7 +275,7 @@ def create_router(
             min(start_offset + DATE_PAGE_SIZE, current_rules.booking_horizon_days),
         ):
             value = today + timedelta(days=offset)
-            if value.isoformat() in closed:
+            if is_closed_date(value, closed, current_rules):
                 continue
             weekday = (
                 value.strftime("%A")
@@ -313,8 +314,10 @@ def create_router(
         unrestricted_time: bool = False,
     ) -> list[datetime]:
         current_rules = rules()
-        if selected_date.isoformat() in set(
-            await asyncio.to_thread(db.list_closed_dates, selected_date.isoformat(), 1)
+        if is_closed_date(
+            selected_date,
+            set(await asyncio.to_thread(db.list_closed_dates, selected_date.isoformat(), 1)),
+            current_rules,
         ):
             return []
         day_start = datetime.combine(selected_date, time.min, zone)
@@ -747,7 +750,7 @@ def create_router(
         if (
             selected < today
             or selected >= today + timedelta(days=current.booking_horizon_days)
-            or selected.isoformat() in closed
+            or is_closed_date(selected, closed, current)
         ):
             await callback.answer("Дата недоступна для записи", show_alert=True)
             return
@@ -991,7 +994,7 @@ def create_router(
             or duration not in current.durations
             or local_start.date() < today
             or local_start.date() >= today + timedelta(days=current.booking_horizon_days)
-            or local_start.date().isoformat() in closed
+            or is_closed_date(local_start.date(), closed, current)
             or local_start < datetime.now(zone) + timedelta(minutes=current.min_lead_minutes)
             or outside_user_window
         ):
@@ -1039,6 +1042,11 @@ def create_router(
         if automation:
             try:
                 notification_rules = load_notification_rules(db, settings)
+                await asyncio.to_thread(
+                    automation.ensure_new_request_notification,
+                    request.id,
+                    settings.admin_telegram_id,
+                )
                 await asyncio.to_thread(
                     automation.ensure_pending_reminder,
                     request.id,
