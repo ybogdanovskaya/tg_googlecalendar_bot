@@ -29,14 +29,14 @@
 
 ### Обязательные условия до production
 
-- [ ] Владелец авторизован в GitHub с правами администратора репозитория.
-- [ ] Создан GitHub Environment `production`.
-- [ ] В Environment добавлены только ограниченные secrets из [CI/CD инструкции](../../CI_CD_инструкция.md): `PROD_SSH_HOST`, `PROD_SSH_USER`, `PROD_SSH_PRIVATE_KEY`, `PROD_SSH_KNOWN_HOSTS`.
-- [ ] Для Environment назначен required reviewer — владелец.
-- [ ] Для `main` включена защита: merge только через pull request и обязательный успешный workflow `CI`.
+- [x] Владелец авторизован в GitHub с правами администратора репозитория.
+- [x] Создан GitHub Environment `production`.
+- [x] В Environment добавлены только ограниченные secrets из [CI/CD инструкции](../../CI_CD_инструкция.md): `PROD_SSH_HOST`, `PROD_SSH_USER`, `PROD_SSH_PRIVATE_KEY`, `PROD_SSH_KNOWN_HOSTS`.
+- [x] Для Environment назначен required reviewer — владелец.
+- [x] Для `main` включена защита: merge только через pull request и обязательный успешный workflow `CI`.
 - [ ] Отдельно утверждён и реализован production-маршрут Mini App: статический bundle, ASGI API, Nginx reverse proxy и запуск службы на loopback.
 - [ ] Production-схема и обратно совместимые миграции проверены на свежей копии рабочей базы с backup и rollback rehearsal.
-- [ ] Выполнен end-to-end CD безопасной текущей версии рабочего бота через ограниченный deploy key.
+- [x] Выполнен end-to-end CD безопасной текущей версии рабочего бота через ограниченный deploy key.
 - [ ] Обновлён внешний паспорт VPS после подтверждённой production-конфигурации.
 
 ## 3. Почему production пока не запускается
@@ -99,10 +99,11 @@
 
 ## 7. Следующее действие владельца
 
-Первое внешнее действие — авторизация владельца в GitHub для настройки Environment и защиты `main`. После неё можно пройти P1 по шагам; к P2 не переходим без отдельного подтверждения.
+P1 завершён. Следующее действие — отдельное подтверждение владельца на P2: проектирование и реализацию production-маршрута Mini App. До него `main` и production Mini App не меняются.
 
 ## Журнал P1
 
 - 2026-08-09: создан GitHub Environment `production`; назначен required reviewer — владелец. Обход подтверждения администраторами выключен.
 - 2026-08-09: для `main` включены pull request, обязательные checks `Python checks` и `Mini App checks`, актуальность ветки перед merge, обязательное разрешение обсуждений, запрет force-push и удаления ветки. Второй reviewer не требуется для личного проекта.
 - 2026-08-09: владелец добавил в Environment четыре ограниченных SSH secrets: `PROD_SSH_HOST`, `PROD_SSH_USER`, `PROD_SSH_PRIVATE_KEY`, `PROD_SSH_KNOWN_HOSTS`. Проверены только имена и количество; значения не читались и не сохранялись в Git.
+- 2026-08-09: end-to-end CD рабочего бота успешно завершён из `main` после отдельного ручного approval владельца в Environment. Проверены revision `c84d1be`, активность рабочего бота и preview, штатный health-check и preview health endpoint. Mini App в production не выпускалась.
