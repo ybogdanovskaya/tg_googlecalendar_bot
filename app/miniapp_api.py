@@ -122,6 +122,14 @@ class AdminManualMeetingBody(BaseModel):
     allow_overlap: bool = False
 
 
+class AdminAllDayEventBody(BaseModel):
+    subject: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=4000)
+    location: str | None = Field(default=None, max_length=1000)
+    start_date: date
+    end_date: date
+
+
 class AdminRequestPatchBody(BaseModel):
     name: str | None = Field(default=None, max_length=120)
     email: str | None = Field(default=None, max_length=254)
@@ -221,6 +229,7 @@ def request_view(value: MeetingRequest, timezone_name: str, open_change: ChangeR
         "email": value.email, "name": value.telegram_name,
         "start_at": value.start_at.astimezone(zone).isoformat(), "end_at": value.end_at.astimezone(zone).isoformat(),
         "duration_minutes": int((value.end_at - value.start_at).total_seconds() // 60),
+        "all_day": value.all_day,
         "status": value.status, "status_label": labels.get(value.status, "Обновляется"),
         "reservation": {"active": value.status == PENDING and value.hold_until > now, "until": value.hold_until.astimezone(zone).isoformat()},
         "allowed_actions": actions, "open_change": change_view(open_change, timezone_name) if open_change else None,
@@ -549,6 +558,23 @@ def create_app(
     async def admin_manual_meetings(current: Actor = Depends(admin_reader)) -> dict[str, Any]:
         items = await asyncio.to_thread(database.list_admin_meetings, current.telegram_id, 50)
         return {"items": [request_view(item, settings.timezone) for item in items]}
+
+    @app.post("/api/v1/admin/all-day-events")
+    async def admin_create_all_day_event(body: AdminAllDayEventBody, current: Actor = Depends(admin_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
+        try:
+            value = await service.admin_create_all_day_event(
+                admin_id=current.telegram_id,
+                subject=body.subject,
+                description=body.description,
+                location=body.location,
+                start_date=body.start_date,
+                end_date=body.end_date,
+            )
+        except BookingValidationError as exc:
+            raise ApiError(422, "VALIDATION_ERROR", "Проверьте тему и диапазон дат события.") from exc
+        except CalendarUnavailable as exc:
+            raise ApiError(503, "EXTERNAL_UNAVAILABLE", "Календарь временно недоступен.", True) from exc
+        return request_view(value, settings.timezone)
 
     @app.post("/api/v1/admin/manual-meetings/{request_id}/cancel")
     async def admin_cancel_manual_meeting(request_id: int, current: Actor = Depends(admin_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:

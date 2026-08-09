@@ -337,6 +337,50 @@ class MiniAppBookingService:
             await asyncio.to_thread(self.database.fail_admin_draft, draft.id, type(exc).__name__)
             raise CalendarUnavailable("manual meeting creation failed") from exc
 
+    async def admin_create_all_day_event(
+        self,
+        *,
+        admin_id: int,
+        subject: str,
+        description: str | None,
+        location: str | None,
+        start_date: date,
+        end_date: date,
+    ) -> MeetingRequest:
+        """Create an inclusive, owner-only all-day calendar block."""
+        local_today = datetime.now(ZoneInfo(self.settings.timezone)).date()
+        if not subject.strip() or start_date < local_today or end_date < start_date:
+            raise BookingValidationError("all-day event is invalid")
+        if (end_date - start_date).days > 366:
+            raise BookingValidationError("all-day event is too long")
+
+        # Keep date boundaries in UTC so Google Calendar and Apps Script receive
+        # unambiguous calendar dates.  The customer booking window begins later
+        # in the local day, therefore the entire selected date range is blocked.
+        start_utc = datetime.combine(start_date, time.min, UTC)
+        end_utc = datetime.combine(end_date + timedelta(days=1), time.min, UTC)
+        draft = await asyncio.to_thread(
+            self.database.create_admin_draft,
+            admin_id=admin_id,
+            admin_name="Администратор",
+            admin_username=None,
+            email=None,
+            subject=subject.strip(),
+            description=description.strip() if description and description.strip() else None,
+            location=location.strip() if location and location.strip() else None,
+            start_at=start_utc,
+            end_at=end_utc,
+            blocks_calendar=True,
+            allow_overlap=True,
+            all_day=True,
+        )
+        try:
+            event_id = await self.calendar.create_event(draft)
+            return await asyncio.to_thread(self.database.complete_approval, draft.id, admin_id, event_id)
+        except Exception as exc:
+            await asyncio.to_thread(self.database.fail_admin_draft, draft.id, type(exc).__name__)
+            raise CalendarUnavailable("all-day event creation failed") from exc
+
     async def admin_cancel_manual_meeting(self, request_id: int, admin_id: int) -> MeetingRequest:
         request = await asyncio.to_thread(self.database.get_request, request_id)
         if (
@@ -371,6 +415,7 @@ class MiniAppBookingService:
             or request.telegram_id != admin_id
             or request.source != "ADMIN"
             or not request.google_event_id
+            or request.all_day
         ):
             raise RequestNotEditableError("manual meeting is unavailable")
         updated_remote = replace(request, **changes)

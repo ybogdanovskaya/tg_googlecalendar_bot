@@ -325,6 +325,14 @@ class MiniAppApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(weekends.status_code, 200)
             self.assertEqual(weekends.json()["value"], [5, 6])
 
+            booking_window = client.patch(
+                "/api/v1/admin/settings",
+                json={"key": "user_booking_window", "value": [9 * 60, 20 * 60 + 30]},
+                headers={**headers, "Idempotency-Key": "w" * 24},
+            )
+            self.assertEqual(booking_window.status_code, 200)
+            self.assertEqual(booking_window.json()["value"], [540, 1230])
+
             added = client.post(
                 "/api/v1/admin/closed-dates",
                 json={"date": "2099-01-01"},
@@ -376,6 +384,35 @@ class MiniAppApiTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(cancelled.status_code, 200)
             self.assertEqual(cancelled.json()["status"], "CANCELLED_BY_ADMIN")
+
+    def test_admin_can_create_all_day_blocking_event(self) -> None:
+        today = datetime.now(ZoneInfo("Europe/Moscow")).date()
+        app = create_app(self.settings, self.database, FreeCalendar(), cookie_secure=False)
+        with TestClient(app) as client:
+            csrf = client.post("/api/v1/auth/telegram", json={"init_data": self._signed_init_data(1)}).json()["csrf_token"]
+            created = client.post(
+                "/api/v1/admin/all-day-events",
+                json={
+                    "subject": "Отпуск",
+                    "start_date": (today + timedelta(days=5)).isoformat(),
+                    "end_date": (today + timedelta(days=8)).isoformat(),
+                },
+                headers={"X-CSRF-Token": csrf, "Idempotency-Key": "a" * 24},
+            )
+            self.assertEqual(created.status_code, 200)
+            self.assertTrue(created.json()["all_day"])
+            self.assertEqual(created.json()["duration_minutes"], 4 * 24 * 60)
+            self.assertTrue(self.database.active_intervals(
+                datetime.combine(today + timedelta(days=6), clock_time(10, 0), ZoneInfo("Europe/Moscow")).astimezone(ZoneInfo("UTC")),
+                datetime.combine(today + timedelta(days=6), clock_time(11, 0), ZoneInfo("Europe/Moscow")).astimezone(ZoneInfo("UTC")),
+            ))
+            self.assertEqual(
+                client.post(
+                    f"/api/v1/admin/manual-meetings/{created.json()['id']}/cancel",
+                    headers={"X-CSRF-Token": csrf, "Idempotency-Key": "b" * 24},
+                ).status_code,
+                200,
+            )
 
     def test_admin_can_create_and_cancel_series(self) -> None:
         zone = ZoneInfo("Europe/Moscow")

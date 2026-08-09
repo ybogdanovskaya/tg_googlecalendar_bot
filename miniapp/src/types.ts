@@ -37,6 +37,8 @@ export interface MeetingRequest {
   start_at: string;
   end_at: string;
   duration_minutes: number;
+  all_day: boolean;
+  blocks_calendar: boolean;
   status: string;
   status_label: string;
   reservation: { active: boolean; until: string };

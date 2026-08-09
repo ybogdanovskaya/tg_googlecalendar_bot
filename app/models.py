@@ -72,6 +72,7 @@ class MeetingRequest:
     source: str = "USER"
     blocks_calendar: bool = True
     admin_override: bool = False
+    all_day: bool = False
 
 
 @dataclass(frozen=True)

@@ -185,6 +185,16 @@ export class CalendarApi {
     return this.request<MeetingRequest>("/admin/manual-meetings", { method: "POST", body: payload, mutation: true });
   }
 
+  async createAdminAllDayEvent(payload: {
+    subject: string;
+    description?: string;
+    location?: string;
+    start_date: string;
+    end_date: string;
+  }): Promise<MeetingRequest> {
+    return this.request<MeetingRequest>("/admin/all-day-events", { method: "POST", body: payload, mutation: true });
+  }
+
   async adminManualMeetings(): Promise<MeetingRequest[]> {
     const response = await this.request<{ items: MeetingRequest[] }>("/admin/manual-meetings");
     return response.items;

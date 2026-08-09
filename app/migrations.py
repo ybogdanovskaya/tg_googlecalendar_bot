@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 LOGGER = logging.getLogger(__name__)
-RELEASE_ID = "miniapp-ux-2026-08"
+RELEASE_ID = "miniapp-admin-calendar-controls-2026-08"
 
 
 @dataclass(frozen=True)
@@ -357,6 +357,13 @@ MIGRATIONS = (
             # The owner confirmed a unified 90-day booking horizon.  Preserve
             # explicitly customized values while moving the old default (30).
             "UPDATE app_settings SET value_json = '90' WHERE key = 'booking_horizon_days' AND value_json = '30'",
+        ),
+    ),
+    Migration(
+        8,
+        "miniapp_all_day_admin_events",
+        (
+            "ALTER TABLE meeting_requests ADD COLUMN all_day INTEGER NOT NULL DEFAULT 0",
         ),
     ),
 )

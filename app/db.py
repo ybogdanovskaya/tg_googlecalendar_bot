@@ -1075,6 +1075,7 @@ class Database:
         end_at: datetime,
         blocks_calendar: bool,
         allow_overlap: bool,
+        all_day: bool = False,
     ) -> MeetingRequest:
         now = _iso(datetime.now(UTC))
         connection = self._connect()
@@ -1098,8 +1099,8 @@ class Database:
                 INSERT INTO meeting_requests (
                     telegram_id, telegram_name, telegram_username, email, subject,
                     description, location, start_at, end_at, status, hold_until,
-                    created_at, updated_at, source, blocks_calendar, admin_override
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ADMIN', ?, ?)
+                    created_at, updated_at, source, blocks_calendar, admin_override, all_day
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ADMIN', ?, ?, ?)
                 """,
                 (
                     admin_id,
@@ -1117,6 +1118,7 @@ class Database:
                     now,
                     int(blocks_calendar),
                     int(allow_overlap),
+                    int(all_day),
                 ),
             )
             request_id = int(cursor.lastrowid)
@@ -1126,7 +1128,7 @@ class Database:
                 "admin_meeting_started",
                 "meeting_request",
                 str(request_id),
-                {"allow_overlap": allow_overlap, "blocks_calendar": blocks_calendar, "has_guest": bool(email)},
+                {"allow_overlap": allow_overlap, "blocks_calendar": blocks_calendar, "all_day": all_day, "has_guest": bool(email)},
             )
             connection.commit()
         except Exception:
@@ -1473,6 +1475,7 @@ class Database:
             source=str(row["source"]),
             blocks_calendar=bool(row["blocks_calendar"]),
             admin_override=bool(row["admin_override"]),
+            all_day=bool(row["all_day"]),
         )
 
     @staticmethod
