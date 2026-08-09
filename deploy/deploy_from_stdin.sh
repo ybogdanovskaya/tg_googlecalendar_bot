@@ -129,6 +129,11 @@ if find "${STAGE_DIR}" -type l -print -quit | grep -q .; then
     echo "deploy_failed reason=symlinks_are_not_allowed"
     exit 1
 fi
+# Dependency installation and candidate tests may run as calendarbot.  Keep
+# the staged release immutable for that user, but grant its service group
+# read/traverse access after the archive has passed the symlink check.
+chown -R root:calendarbot "${STAGE_DIR}"
+chmod -R u=rwX,g=rX,o= "${STAGE_DIR}"
 
 for required in app scripts tests requirements.txt README.md REVISION; do
     if [[ ! -e "${STAGE_DIR}/${required}" ]]; then
