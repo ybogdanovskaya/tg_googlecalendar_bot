@@ -314,6 +314,42 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        6,
+        "miniapp_sessions_and_idempotency",
+        (
+            """
+            CREATE TABLE IF NOT EXISTS miniapp_sessions (
+                token_hash TEXT PRIMARY KEY,
+                telegram_id INTEGER NOT NULL REFERENCES users(telegram_id),
+                csrf_hash TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_miniapp_sessions_expiry
+            ON miniapp_sessions(expires_at)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS miniapp_idempotency (
+                telegram_id INTEGER NOT NULL REFERENCES users(telegram_id),
+                operation TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                request_hash TEXT NOT NULL,
+                request_id INTEGER NOT NULL REFERENCES meeting_requests(id),
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                PRIMARY KEY (telegram_id, operation, idempotency_key)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_miniapp_idempotency_expiry
+            ON miniapp_idempotency(expires_at)
+            """,
+        ),
+    ),
 )
 
 

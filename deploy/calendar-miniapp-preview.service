@@ -1,0 +1,25 @@
+[Unit]
+Description=Telegram Calendar Mini App preview API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=calendarbot
+Group=calendarbot
+WorkingDirectory=/opt/calendar-miniapp-preview
+EnvironmentFile=/etc/calendar-miniapp-preview/calendar-miniapp-preview.env
+ExecStart=/opt/calendar-miniapp-preview/.venv/bin/python -m app.miniapp_api
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/calendar-miniapp-preview /var/log/calendar-miniapp-preview
+UMask=0077
+MemoryMax=220M
+
+[Install]
+WantedBy=multi-user.target

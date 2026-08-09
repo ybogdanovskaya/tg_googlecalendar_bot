@@ -17,8 +17,11 @@ def verify_sqlite(path: Path, immutable: bool = False) -> None:
     if not path.exists():
         raise RuntimeError("database_missing")
     immutable_option = "&immutable=1" if immutable else ""
-    with sqlite3.connect(f"file:{path}?mode=ro{immutable_option}", uri=True) as connection:
+    connection = sqlite3.connect(f"file:{path}?mode=ro{immutable_option}", uri=True)
+    try:
         result = connection.execute("PRAGMA quick_check").fetchone()
+    finally:
+        connection.close()
     if not result or str(result[0]).lower() != "ok":
         raise RuntimeError("database_check_failed")
 

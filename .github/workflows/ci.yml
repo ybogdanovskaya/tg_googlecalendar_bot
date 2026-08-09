@@ -49,3 +49,37 @@ jobs:
 
       - name: Run automated tests
         run: python -m unittest discover -s tests -v
+
+  miniapp-checks:
+    name: Mini App checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    defaults:
+      run:
+        working-directory: miniapp
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: miniapp/package-lock.json
+
+      - name: Install locked frontend dependencies
+        run: npm ci
+
+      - name: Run frontend tests
+        run: npm test
+
+      - name: Build static Mini App
+        run: npm run build
+
+      - name: Verify static artifact stays untracked
+        run: |
+          test -f dist/index.html
+          git -C "$GITHUB_WORKSPACE" check-ignore -q miniapp/dist

@@ -166,3 +166,10 @@ class CalendarEventState:
     location: str | None
     blocks_calendar: bool | None
     updated_at: datetime | None
+
+
+@dataclass(frozen=True)
+class MiniAppSession:
+    telegram_id: int
+    csrf_hash: str
+    expires_at: datetime
