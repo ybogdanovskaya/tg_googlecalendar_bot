@@ -354,6 +354,10 @@ def create_app(
             raise ApiError(422, "VALIDATION_ERROR", "Для действия требуется ключ повтора.")
         return value
 
+    @app.get("/api/v1/health")
+    async def health() -> dict[str, str]:
+        return {"status": "ok"}
+
     @app.post("/api/v1/auth/telegram")
     async def telegram_auth(body: TelegramAuthBody, response: Response) -> dict[str, Any]:
         user = validate_telegram_init_data(body.init_data, settings.bot_token, initdata_max_age_seconds)

@@ -97,6 +97,13 @@ class MiniAppApiTests(unittest.IsolatedAsyncioTestCase):
             validate_telegram_init_data("auth_date=1&user=%7B%7D&hash=invalid", self.settings.bot_token)
         self.assertEqual(captured.exception.code, "AUTH_INVALID")
 
+    def test_health_requires_no_authentication(self) -> None:
+        app = create_app(self.settings, self.database, FreeCalendar(), cookie_secure=False)
+        with TestClient(app) as client:
+            response = client.get("/api/v1/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok"})
+
     async def test_create_request_is_idempotent(self) -> None:
         zone = ZoneInfo("Europe/Moscow")
         start = datetime.combine(datetime.now(zone).date() + timedelta(days=3), clock_time(10, 0), zone)
