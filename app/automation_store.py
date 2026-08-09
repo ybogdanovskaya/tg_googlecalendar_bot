@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from typing import Iterable
+from zoneinfo import ZoneInfo
 
 from app.db import Database, RequestNotEditableError, SlotConflictError, _dt, _iso
 from app.models import (
@@ -432,14 +433,29 @@ class AutomationStore:
             self._cancel_jobs_for_request(connection, request_id, _iso(current), JOB_MEETING_REMINDER)
             count = 0
             if request and request.status == APPROVED and request.start_at > current:
-                scheduled_minutes = (1440,) if request.all_day else reminder_minutes
+                if request.all_day:
+                    local_start = request.start_at.astimezone(ZoneInfo("Europe/Moscow"))
+                    schedules = [
+                        (
+                            "all-day-0900",
+                            datetime.combine(
+                                local_start.date() - timedelta(days=1),
+                                time(9, 0),
+                                tzinfo=ZoneInfo("Europe/Moscow"),
+                            ).astimezone(UTC),
+                        )
+                    ]
+                else:
+                    schedules = [
+                        (str(int(minutes)), request.start_at - timedelta(minutes=int(minutes)))
+                        for minutes in reminder_minutes
+                    ]
                 recipients = {request.telegram_id, admin_id}
                 for recipient in recipients:
-                    for minutes in scheduled_minutes:
-                        due = request.start_at - timedelta(minutes=int(minutes))
+                    for schedule_key, due in schedules:
                         if due < current:
                             due = current
-                        key = f"meeting:{request.id}:{request.start_at.isoformat()}:{recipient}:{int(minutes)}"
+                        key = f"meeting:{request.id}:{request.start_at.isoformat()}:{recipient}:{schedule_key}"
                         count += self._insert_job(
                             connection,
                             JOB_MEETING_REMINDER,

@@ -177,7 +177,7 @@ class AutomationStoreTests(unittest.TestCase):
             ).fetchall()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["recipient_telegram_id"], 1)
-        self.assertEqual(rows[0]["due_at"], (now + timedelta(days=2)).isoformat())
+        self.assertEqual(rows[0]["due_at"], (now + timedelta(days=2, hours=-3)).isoformat())
 
     def test_failed_job_is_retried_without_duplicate_delivery(self) -> None:
         now = datetime(2026, 8, 7, 9, 0, tzinfo=UTC)
