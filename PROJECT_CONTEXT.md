@@ -129,7 +129,7 @@ Telegram Mini App
 
 - frontend и API Mini App реализованы и проверены локально; frontend CI в `dev` работает;
 - для изолированного preview подготовлены отдельные тестовые Telegram Bot, Google Calendar и Apps Script gateway, а также DNS-имя `calendar-dev.yibogdanovskaya.ru`;
-- начат отдельный этап создания preview на VPS: он использует самостоятельные каталоги, SQLite, systemd-службу и Nginx server block, не затрагивая working bot и production;
+- изолированный preview развёрнут на VPS: он использует самостоятельные каталоги, SQLite, systemd-службу, HTTPS и Nginx server block, не затрагивая working bot и production; следующий шаг — BotFather URL и Telegram UAT;
 - production-развёртывание, `main`, GitHub Environment/secrets и end-to-end CD остаются отдельными незавершёнными вопросами и требуют авторизации владельца.
 
 ## 7. Что ещё нужно спроектировать для Mini App
