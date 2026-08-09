@@ -37,6 +37,21 @@ jobs:
           python -m compileall -q app scripts tests
           python -m unittest discover -s tests -v
 
+      - name: Set up Node.js for Mini App verification
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: miniapp/package-lock.json
+
+      - name: Verify Mini App candidate
+        working-directory: miniapp
+        run: |
+          npm ci
+          npm test
+          npm run build
+          test -f dist/index.html
+
   deploy:
     name: Deploy after approval
     needs: verify
@@ -48,10 +63,24 @@ jobs:
       - name: Check out verified commit
         uses: actions/checkout@v6
 
+      - name: Set up Node.js for static build
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: miniapp/package-lock.json
+
+      - name: Build verified static Mini App
+        working-directory: miniapp
+        run: |
+          npm ci
+          npm run build
+          test -f dist/index.html
+
       - name: Build deployment archive
         run: |
           printf '%s\n' "$GITHUB_SHA" > REVISION
-          tar -czf release.tar.gz app scripts deploy tests requirements.txt README.md REVISION
+          tar -czf release.tar.gz app scripts deploy tests miniapp/dist requirements.txt README.md REVISION
 
       - name: Configure restricted SSH access
         env:
