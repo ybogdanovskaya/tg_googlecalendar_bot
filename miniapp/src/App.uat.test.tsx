@@ -13,11 +13,12 @@ function installTelegram(): void {
   window.Telegram = { WebApp: { initData: "signed-test-data", ready: vi.fn(), expand: vi.fn(), close: vi.fn() } };
 }
 
-function installApi(role: "USER" | "ADMIN"): void {
+function installApi(role: "USER" | "ADMIN", bookingEnabled = true): void {
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const path = String(input);
     if (path.endsWith("/auth/telegram")) return json({ user: { display_name: "Тестовый пользователь", role, consent: { accepted: true, version: "test" } }, csrf_token: "csrf-token", expires_at: NOW });
     if (path.endsWith("/me")) return json({ role, consent: { accepted: true, version: "test" }, timezone: "Europe/Moscow", expires_at: NOW });
+    if (path.endsWith("/booking/config")) return json({ timezone: "Europe/Moscow", booking_enabled: bookingEnabled, durations: [30], step_minutes: 30, horizon_days: 30, min_lead_minutes: 60, window: { start_minutes: 480, end_minutes: 1260 } });
     if (path.endsWith("/requests")) return json({ items: [] });
     if (path.endsWith("/admin/dashboard")) return json({ pending_requests: 0, pending_changes: 0, statistics: { user_requests: 0, manual_meetings: 0, calendar_meetings: 0, unique_users: 1 } });
     if (path.endsWith("/admin/requests") || path.endsWith("/admin/series") || path.endsWith("/admin/change-requests") || path.endsWith("/admin/manual-meetings") || path.endsWith("/admin/closed-dates")) return json({ items: [] });
@@ -52,6 +53,17 @@ describe("локальный UAT экранов", () => {
     fireEvent.click(screen.getByRole("button", { name: /Мои встречи/ }));
     expect(await screen.findByText("Пока нет заявок на встречу.")).toBeInTheDocument();
     expect(screen.queryByText("Управление календарём")).not.toBeInTheDocument();
+  });
+
+  it("не даёт начать запись, когда администратор её приостановил", async () => {
+    installTelegram();
+    installApi("USER", false);
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Записаться на встречу" }));
+    expect(await screen.findByRole("heading", { name: "Запись временно недоступна" })).toBeInTheDocument();
+    expect(screen.getByText("Новые заявки временно выключены администратором. Попробуйте позже.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "30 минут" })).not.toBeInTheDocument();
   });
 
   it("показывает административный экран только для роли, пришедшей от API", async () => {

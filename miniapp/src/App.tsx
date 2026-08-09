@@ -132,7 +132,7 @@ function Booking({ api, onDone, onBack }: { api: CalendarApi; onDone: () => void
 
   useEffect(() => { void api.bookingConfig().then(setConfig).catch((caught) => setError(friendlyError(caught))).finally(() => setLoading(false)); }, [api]);
   useEffect(() => {
-    if (!config) return;
+    if (!config || !config.booking_enabled) return;
     const from = isoDate(new Date());
     const to = isoDate(new Date(Date.now() + (config.horizon_days - 1) * 86_400_000));
     setLoading(true); setError("");
@@ -155,6 +155,7 @@ function Booking({ api, onDone, onBack }: { api: CalendarApi; onDone: () => void
 
   if (loading && !config) return <SectionLoading label="Загружаем правила записи…" />;
   if (!config) return <ErrorBlock text={error} onRetry={onBack} />;
+  if (!config.booking_enabled) return <section className="flow"><div className="flow-heading"><button className="back" onClick={onBack}>←</button><div><span className="eyebrow">Запись</span><h1>Запись временно недоступна</h1></div></div><Empty label="Новые заявки временно выключены администратором. Попробуйте позже." /></section>;
   return <section className="flow"><div className="flow-heading"><button className="back" onClick={onBack}>←</button><div><span className="eyebrow">Запись · шаг {step} из 5</span><h1>{["Выберите длительность", "Выберите дату", "Выберите время", "Расскажите о встрече", "Проверьте заявку"][step - 1]}</h1></div></div><div className="progress"><i style={{ width: `${step * 20}%` }} /></div>{error && <p className="error" role="alert">{error}</p>}
     {step === 1 && <div className="choice-grid">{config.durations.map((duration) => <button className={`choice ${draft.durationMinutes === duration ? "selected" : ""}`} key={duration} onClick={() => { setDraft({ ...draft, durationMinutes: duration }); setStep(2); }}>{duration} минут</button>)}</div>}
     {step === 2 && <div className="date-grid">{dates.map((date) => <button key={date} className={`date-button ${draft.date === date ? "selected" : ""}`} onClick={() => { setDraft({ ...draft, date, slot: null }); setStep(3); }}><strong>{new Intl.DateTimeFormat("ru-RU", { day: "numeric" }).format(new Date(`${date}T12:00:00`))}</strong><span>{new Intl.DateTimeFormat("ru-RU", { weekday: "short" }).format(new Date(`${date}T12:00:00`))}</span></button>)}</div>}
