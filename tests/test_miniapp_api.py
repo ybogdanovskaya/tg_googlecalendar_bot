@@ -212,6 +212,24 @@ class MiniAppApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["id"] for item in payload["items"]], [str(active.id)])
         self.assertEqual([item["id"] for item in payload["archive"]], [str(archived.id)])
 
+    def test_user_requests_show_latest_created_first(self) -> None:
+        now = datetime.now(ZoneInfo("UTC"))
+        first = self.database.create_request(
+            telegram_id=100, telegram_name="Tester", telegram_username="tester", email="test@example.com",
+            subject="First", description=None, location=None,
+            start_at=now + timedelta(days=5), end_at=now + timedelta(days=5, minutes=30), hold_hours=24,
+        )
+        latest = self.database.create_request(
+            telegram_id=100, telegram_name="Tester", telegram_username="tester", email="test@example.com",
+            subject="Latest", description=None, location=None,
+            start_at=now + timedelta(days=2), end_at=now + timedelta(days=2, minutes=30), hold_hours=24,
+        )
+        app = create_app(self.settings, self.database, FreeCalendar(), cookie_secure=False)
+        with TestClient(app) as client:
+            client.post("/api/v1/auth/telegram", json={"init_data": self._signed_init_data(100)})
+            payload = client.get("/api/v1/requests").json()
+        self.assertEqual([item["id"] for item in payload["items"]], [str(latest.id), str(first.id)])
+
     def test_calendar_allows_the_confirmed_ninety_day_horizon(self) -> None:
         today = datetime.now(ZoneInfo("Europe/Moscow")).date()
         app = create_app(self.settings, self.database, FreeCalendar(), cookie_secure=False)

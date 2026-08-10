@@ -762,6 +762,7 @@ def create_app(
     @app.get("/api/v1/requests")
     async def list_requests(current: Actor = Depends(actor)) -> dict[str, Any]:
         items = await asyncio.to_thread(database.list_user_requests, current.telegram_id, 100)
+        items.reverse()
         open_changes = await asyncio.to_thread(database.list_open_changes_for_requests, [item.id for item in items])
         now = datetime.now(UTC)
         archived_statuses = {REJECTED, CANCELLED, CANCELLED_BY_ADMIN}
