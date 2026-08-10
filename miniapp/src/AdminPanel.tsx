@@ -74,6 +74,7 @@ export function AdminPanel({ api }: { api: CalendarApi }) {
   const [manualSubject, setManualSubject] = useState("");
   const [manualEmail, setManualEmail] = useState("");
   const [manualStart, setManualStart] = useState("");
+  const [manualStartError, setManualStartError] = useState("");
   const [manualDuration, setManualDuration] = useState(30);
   const [manualBlocksCalendar, setManualBlocksCalendar] = useState(true);
   const [manualAllDay, setManualAllDay] = useState(false);
@@ -475,6 +476,14 @@ export function AdminPanel({ api }: { api: CalendarApi }) {
                 : !manualStart)
             )
               return;
+            if (!manualAllDay) {
+              const selectedStart = new Date(manualStart);
+              if (Number.isNaN(selectedStart.getTime()) || selectedStart <= new Date()) {
+                setManualStartError("Укажите время в будущем.");
+                return;
+              }
+            }
+            setManualStartError("");
             void act(
               manualAllDay ? "all-day-event" : "manual-meeting",
               async () => {
@@ -488,16 +497,21 @@ export function AdminPanel({ api }: { api: CalendarApi }) {
                     blocks_calendar: manualBlocksCalendar,
                   });
                 } else {
-                  await api.createAdminManualMeeting({
-                    subject: manualSubject,
-                    email: manualEmail || undefined,
-                    description: manualDescription || undefined,
-                    location: manualLocation || undefined,
-                    start_at: new Date(manualStart).toISOString(),
-                    duration_minutes: manualDuration,
-                    blocks_calendar: manualBlocksCalendar,
-                    allow_overlap: false,
-                  });
+                  try {
+                    await api.createAdminManualMeeting({
+                      subject: manualSubject,
+                      email: manualEmail || undefined,
+                      description: manualDescription || undefined,
+                      location: manualLocation || undefined,
+                      start_at: new Date(manualStart).toISOString(),
+                      duration_minutes: manualDuration,
+                      blocks_calendar: manualBlocksCalendar,
+                      allow_overlap: false,
+                    });
+                  } catch (caught) {
+                    setManualStartError(adminError(caught));
+                    throw caught;
+                  }
                 }
                 setManualSubject("");
                 setManualEmail("");
@@ -561,30 +575,46 @@ export function AdminPanel({ api }: { api: CalendarApi }) {
               </label>
             </div>
           ) : (
-            <div className="form-row">
-              <label>
-                Дата и время
-                <input
-                  type="datetime-local"
-                  value={manualStart}
-                  onChange={(event) => setManualStart(event.target.value)}
-                  required
-                />
-              </label>
-              <label>
-                Минуты
-                <select
-                  value={manualDuration}
-                  onChange={(event) =>
-                    setManualDuration(Number(event.target.value))
-                  }
-                >
-                  {[15, 30, 45, 60, 90, 120].map((value) => (
-                    <option key={value}>{value}</option>
-                  ))}
-                </select>
-              </label>
-            </div>
+            <>
+              <div className="form-row">
+                <label>
+                  Дата и время
+                  <input
+                    type="datetime-local"
+                    value={manualStart}
+                    className={manualStartError ? "field-error" : undefined}
+                    aria-invalid={Boolean(manualStartError)}
+                    aria-describedby={manualStartError ? "manual-start-hint manual-start-error" : "manual-start-hint"}
+                    onChange={(event) => {
+                      setManualStart(event.target.value);
+                      setManualStartError("");
+                    }}
+                    required
+                  />
+                </label>
+                <label>
+                  Минуты
+                  <select
+                    value={manualDuration}
+                    onChange={(event) =>
+                      setManualDuration(Number(event.target.value))
+                    }
+                  >
+                    {[15, 30, 45, 60, 90, 120].map((value) => (
+                      <option key={value}>{value}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <p id="manual-start-hint" className="form-hint">
+                Для ручного события можно выбрать любое будущее время.
+              </p>
+              {manualStartError && (
+                <p id="manual-start-error" className="form-validation-summary" role="alert">
+                  {manualStartError}
+                </p>
+              )}
+            </>
           )}
           <label>
             Описание <span>необязательно</span>

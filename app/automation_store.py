@@ -14,6 +14,7 @@ from app.models import (
     CHANGE_APPROVING,
     CHANGE_PENDING,
     CHANGE_RESCHEDULE,
+    JOB_CHANGE_REQUEST_NOTIFICATION,
     JOB_CANCELLED,
     JOB_DONE,
     JOB_FAILED,
@@ -35,6 +36,7 @@ from app.models import (
     SYNC_MISSING,
     SYNCED,
     CalendarEventState,
+    ChangeRequest,
     EventOccurrence,
     EventSeries,
     MeetingRequest,
@@ -553,6 +555,43 @@ class AutomationStore:
                 key,
                 current,
             )
+
+    def ensure_change_request_notification(
+        self,
+        change: ChangeRequest,
+        admin_id: int,
+        now: datetime | None = None,
+    ) -> int:
+        """Schedule one immediate, idempotent notification for a requested change."""
+        if change.status != CHANGE_PENDING:
+            return 0
+        current = now or datetime.now(UTC)
+        key = f"change-request:{change.id}:{admin_id}"
+        with self.db._connect() as connection:
+            return self._insert_job(
+                connection,
+                JOB_CHANGE_REQUEST_NOTIFICATION,
+                change.request_id,
+                None,
+                admin_id,
+                current,
+                key,
+                current,
+            )
+
+    def get_change_request_notification_subject(self, job: ScheduledJob) -> ChangeRequest | None:
+        """Return the exact open change request associated with a notification job."""
+        prefix = "change-request:"
+        if job.job_type != JOB_CHANGE_REQUEST_NOTIFICATION or not job.idempotency_key.startswith(prefix):
+            return None
+        try:
+            change_id = int(job.idempotency_key[len(prefix):].split(":", 1)[0])
+        except ValueError:
+            return None
+        change = self.db.get_change_request(change_id)
+        if change is None or change.request_id != job.request_id or change.status != CHANGE_PENDING:
+            return None
+        return change
 
     def schedule_next_pending_reminder(
         self,

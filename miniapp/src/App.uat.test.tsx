@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App, { MeetingForm } from "./App";
@@ -79,6 +79,25 @@ describe("локальный UAT экранов", () => {
     expect(await screen.findByRole("heading", { name: "Управление календарём" })).toBeInTheDocument();
     expect(await screen.findByText("Google Calendar доступен.")).toBeInTheDocument();
     expect(screen.queryByText("Пользовательский режим")).not.toBeInTheDocument();
+  });
+
+  it("объясняет администратору, что ручное событие нельзя создать в прошлом", async () => {
+    installTelegram();
+    installApi("ADMIN");
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Управление календарём" }));
+    const title = await screen.findByRole("heading", { name: "Добавить событие" });
+    const card = title.closest("article");
+    expect(card).not.toBeNull();
+    const form = within(card as HTMLElement);
+    fireEvent.change(form.getByLabelText("Тема"), { target: { value: "Тест" } });
+    fireEvent.change(form.getByLabelText("Дата и время"), { target: { value: "2020-01-01T12:00" } });
+    fireEvent.click(form.getByRole("button", { name: "Создать событие" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Укажите время в будущем.");
+    expect(form.getByLabelText("Дата и время")).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByText("Для ручного события можно выбрать любое будущее время.")).toBeInTheDocument();
   });
 
   it("объясняет, какие обязательные поля не заполнены на пятом шаге", () => {

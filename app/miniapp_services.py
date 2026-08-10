@@ -650,13 +650,15 @@ class MiniAppBookingService:
         if change_type == CHANGE_CANCEL:
             if start_at is not None or duration_minutes is not None:
                 raise BookingValidationError("cancel change cannot include a slot")
-            return await asyncio.to_thread(self.database.create_change_request, request_id, telegram_id, CHANGE_CANCEL)
+            change = await asyncio.to_thread(self.database.create_change_request, request_id, telegram_id, CHANGE_CANCEL)
+            await self._schedule_change_request_notification(change)
+            return change
         if change_type != CHANGE_RESCHEDULE or start_at is None or duration_minutes is None:
             raise BookingValidationError("reschedule requires a slot")
         start_utc, end_utc = self._validate_slot(start_at, duration_minutes, self.rules())
         if not await self.calendar.is_free(start_utc, end_utc):
             raise SlotConflictError("google calendar slot is busy")
-        return await asyncio.to_thread(
+        change = await asyncio.to_thread(
             self.database.create_change_request,
             request_id,
             telegram_id,
@@ -664,6 +666,18 @@ class MiniAppBookingService:
             start_utc,
             end_utc,
         )
+        await self._schedule_change_request_notification(change)
+        return change
+
+    async def _schedule_change_request_notification(self, change: ChangeRequest) -> None:
+        try:
+            await asyncio.to_thread(
+                self.automation.ensure_change_request_notification,
+                change,
+                self.settings.admin_telegram_id,
+            )
+        except Exception:
+            LOGGER.exception("miniapp_change_notification_schedule_failed", extra={"change_id": change.id})
 
     async def create_deletion_request(self, telegram_id: int, mode: str) -> DeletionRequest:
         return await asyncio.to_thread(self.deletions.create_deletion_request, telegram_id, mode)

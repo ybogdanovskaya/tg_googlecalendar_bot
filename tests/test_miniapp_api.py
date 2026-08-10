@@ -624,6 +624,12 @@ class MiniAppApiTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(changed.status_code, 200)
             self.assertEqual(changed.json()["change_type"], "RESCHEDULE")
+            with self.database._connect() as connection:
+                jobs = connection.execute(
+                    "SELECT job_type, request_id FROM scheduled_jobs WHERE job_type = 'CHANGE_REQUEST_NOTIFICATION'"
+                ).fetchall()
+            self.assertEqual(len(jobs), 1)
+            self.assertEqual(int(jobs[0]["request_id"]), request.id)
 
             listed = client.get("/api/v1/requests")
             self.assertEqual(listed.status_code, 200)
