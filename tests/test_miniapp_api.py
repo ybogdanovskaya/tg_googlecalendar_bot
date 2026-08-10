@@ -217,6 +217,7 @@ class MiniAppApiTests(unittest.IsolatedAsyncioTestCase):
         app = create_app(self.settings, self.database, FreeCalendar(), cookie_secure=False)
         with TestClient(app) as client:
             client.post("/api/v1/auth/telegram", json={"init_data": self._signed_init_data(100)})
+            config = client.get("/api/v1/booking/config")
             allowed = client.get(
                 "/api/v1/booking/calendar",
                 params={"from_date": today.isoformat(), "to_date": (today + timedelta(days=89)).isoformat()},
@@ -225,6 +226,8 @@ class MiniAppApiTests(unittest.IsolatedAsyncioTestCase):
                 "/api/v1/booking/calendar",
                 params={"from_date": today.isoformat(), "to_date": (today + timedelta(days=90)).isoformat()},
             )
+        self.assertEqual(config.status_code, 200)
+        self.assertEqual(config.json()["hold_hours"], 24)
         self.assertEqual(allowed.status_code, 200)
         self.assertEqual(too_long.status_code, 422)
 

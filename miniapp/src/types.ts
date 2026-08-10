@@ -14,6 +14,7 @@ export interface BookingConfig {
   step_minutes: number;
   horizon_days: number;
   min_lead_minutes: number;
+  hold_hours: number;
   window: { start_minutes: number; end_minutes: number };
 }
 

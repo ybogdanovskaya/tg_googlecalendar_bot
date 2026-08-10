@@ -55,6 +55,20 @@ function timeOf(value: string): string {
   }).format(new Date(value));
 }
 
+function hoursText(value: number): string {
+  const remainder = Math.abs(value) % 100;
+  const last = remainder % 10;
+  const unit =
+    remainder >= 11 && remainder <= 14
+      ? "часов"
+      : last === 1
+        ? "час"
+        : last >= 2 && last <= 4
+          ? "часа"
+          : "часов";
+  return `${value} ${unit}`;
+}
+
 function isoDate(value: Date): string {
   const offset = value.getTimezoneOffset();
   return new Date(value.getTime() - offset * 60_000).toISOString().slice(0, 10);
@@ -144,7 +158,7 @@ export default function App() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <span className="eyebrow">Календарь встреч</span>
+        <span className="eyebrow">Календарь встреч Яны Богдановской</span>
         <span className="role-badge">
           {session.role === "ADMIN"
             ? "Пользовательский режим"
@@ -305,8 +319,8 @@ function Home({
       <section className="info-card">
         <span>Мои встречи</span>
         <p>
-          Проверьте статус заявки, измените или отмените её, пока резерв
-          активен.
+          Следите за статусом заявки. До подтверждения её можно изменить или
+          отменить; после подтверждения — запросить перенос или отмену.
         </p>
         <button className="text-button" onClick={onRequests}>
           Открыть список →
@@ -578,7 +592,7 @@ function Booking({
           </p>
           {draft.location && <p>{draft.location}</p>}
           <p className="muted">
-            Слот будет зарезервирован на срок, установленный правилами записи.
+            После отправки выбранное время будет удерживаться {hoursText(config.hold_hours)}, пока заявка ожидает решения.
           </p>
           <button
             className="button primary"

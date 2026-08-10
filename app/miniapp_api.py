@@ -736,7 +736,7 @@ def create_app(
     @app.get("/api/v1/booking/config")
     async def booking_config(_: Actor = Depends(actor)) -> dict[str, Any]:
         rules = await asyncio.to_thread(service.rules)
-        return {"timezone": settings.timezone, "booking_enabled": rules.booking_enabled, "durations": list(rules.durations), "step_minutes": rules.step_minutes, "horizon_days": rules.booking_horizon_days, "min_lead_minutes": rules.min_lead_minutes, "window": {"start_minutes": rules.user_booking_start_minutes, "end_minutes": rules.user_booking_end_minutes}}
+        return {"timezone": settings.timezone, "booking_enabled": rules.booking_enabled, "durations": list(rules.durations), "step_minutes": rules.step_minutes, "horizon_days": rules.booking_horizon_days, "min_lead_minutes": rules.min_lead_minutes, "hold_hours": rules.hold_hours, "window": {"start_minutes": rules.user_booking_start_minutes, "end_minutes": rules.user_booking_end_minutes}}
 
     @app.get("/api/v1/booking/calendar")
     async def booking_calendar(from_date: str, to_date: str, _: Actor = Depends(actor)) -> dict[str, Any]:
