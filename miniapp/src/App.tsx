@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { ApiError, CalendarApi } from "./api";
 import { AdminPanel } from "./AdminPanel";
+import { slotsForDayPeriod } from "./booking";
 import { closeTelegramApp, telegramInitData } from "./telegram";
 import type {
   BookingConfig,
@@ -434,16 +435,7 @@ function Booking({
     { key: "day", title: "День", range: "12:00–17:00" },
     { key: "evening", title: "Вечер", range: "после 17:00" },
   ];
-  const filteredSlots = period
-    ? slots.filter((slot) => {
-        const hour = Number(slot.slice(11, 13));
-        return period === "morning"
-          ? hour < 12
-          : period === "day"
-            ? hour < 17
-            : hour >= 17;
-      })
-    : [];
+  const filteredSlots = period ? slotsForDayPeriod(slots, period as "morning" | "day" | "evening") : [];
   const goBack = () => {
     if (step === 1) onBack();
     else {
