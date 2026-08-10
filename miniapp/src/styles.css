@@ -13,7 +13,7 @@ button { cursor: pointer; }
 button:disabled { cursor: wait; opacity: .62; }
 
 .app-shell { min-height: 100dvh; padding: calc(18px + env(safe-area-inset-top)) 18px calc(86px + env(safe-area-inset-bottom)); }
-.topbar, .section-heading, .flow-heading, .request-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.topbar, .section-heading, .flow-heading, .request-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; }.topbar { justify-content: flex-start; }
 .page { width: min(100%, 720px); margin: 0 auto; }
 .eyebrow { margin: 0; color: #4c7062; font-size: 12px; font-weight: 750; letter-spacing: .09em; text-transform: uppercase; }
 .role-badge, .request-meta span { border-radius: 999px; background: #dce9df; color: #28594a; padding: 6px 9px; font-size: 12px; font-weight: 650; }

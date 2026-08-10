@@ -159,11 +159,6 @@ export default function App() {
     <main className="app-shell">
       <header className="topbar">
         <span className="eyebrow">Календарь встреч Яны Богдановской</span>
-        <span className="role-badge">
-          {session.role === "ADMIN"
-            ? "Пользовательский режим"
-            : "Личный кабинет"}
-        </span>
       </header>
       <section className="page">
         {screen === "home" && (

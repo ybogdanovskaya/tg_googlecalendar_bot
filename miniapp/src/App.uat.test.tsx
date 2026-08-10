@@ -52,6 +52,7 @@ describe("локальный UAT экранов", () => {
 
     expect(await screen.findByRole("heading", { name: "Выберите удобное время для встречи" })).toBeInTheDocument();
     expect(screen.getByText("Календарь встреч Яны Богдановской")).toBeInTheDocument();
+    expect(screen.queryByText("Личный кабинет")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Мои встречи/ }));
     expect(await screen.findByText("Пока нет актуальных заявок на встречу.")).toBeInTheDocument();
     expect(screen.queryByText("Управление календарём")).not.toBeInTheDocument();
@@ -77,6 +78,7 @@ describe("локальный UAT экранов", () => {
     fireEvent.click(adminNavigation);
     expect(await screen.findByRole("heading", { name: "Управление календарём" })).toBeInTheDocument();
     expect(await screen.findByText("Google Calendar доступен.")).toBeInTheDocument();
+    expect(screen.queryByText("Пользовательский режим")).not.toBeInTheDocument();
   });
 
   it("объясняет, какие обязательные поля не заполнены на пятом шаге", () => {
