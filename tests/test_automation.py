@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from app.automation import process_due_jobs, reconcile_once
 from app.automation_store import AutomationStore
 from app.db import Database
-from app.models import CalendarEventState
+from app.models import CHANGE_CANCEL, CalendarEventState
 
 
 class FakeBot:
@@ -99,6 +99,17 @@ class AutomationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await process_due_jobs(bot, self.store, self.settings, now), 1)
         self.assertEqual(len(bot.sent), 1)
         self.assertIn("Новая заявка", bot.sent[0][1])
+        self.assertEqual(await process_due_jobs(bot, self.store, self.settings, now), 0)
+
+    async def test_change_request_notification_is_delivered_once(self) -> None:
+        now = datetime.now(UTC)
+        request = self.approved(now + timedelta(days=2))
+        change = self.db.create_change_request(request.id, 100, CHANGE_CANCEL)
+        self.store.ensure_change_request_notification(change, 1, now)
+        bot = FakeBot()
+        self.assertEqual(await process_due_jobs(bot, self.store, self.settings, now), 1)
+        self.assertEqual(len(bot.sent), 1)
+        self.assertIn("Запрос на отмену встречи", bot.sent[0][1])
         self.assertEqual(await process_due_jobs(bot, self.store, self.settings, now), 0)
 
     async def test_reconciliation_updates_time_and_notifies_both_parties(self) -> None:
