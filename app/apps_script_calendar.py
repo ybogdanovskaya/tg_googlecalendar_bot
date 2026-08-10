@@ -82,6 +82,9 @@ class AppsScriptCalendar:
                 "location": request.location or "",
                 "allowOverlap": request.admin_override,
                 "transparent": not request.blocks_calendar,
+                "allDay": request.all_day,
+                "allDayStart": request.start_at.date().isoformat() if request.all_day else "",
+                "allDayEnd": request.end_at.date().isoformat() if request.all_day else "",
             },
         )
         event_id = response.get("eventId")

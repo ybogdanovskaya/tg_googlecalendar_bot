@@ -61,6 +61,29 @@ class AppsScriptCalendarTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(captured[0]["allowOverlap"])
             self.assertTrue(captured[0]["transparent"])
 
+    async def test_all_day_create_payload_has_inclusive_date_range(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            secret_file = Path(temporary) / "secret"
+            secret_file.write_text("test-secret", encoding="utf-8")
+            client = AppsScriptCalendar("https://script.google.com/macros/s/example/exec", secret_file)
+            captured = []
+
+            def post(payload):
+                captured.append(payload)
+                return {"ok": True, "eventId": "all-day-event"}
+
+            client._post = post
+            start = datetime(2026, 8, 20, tzinfo=UTC)
+            meeting = MeetingRequest(
+                1, 100, "Admin", None, "", "Отпуск", None, None,
+                start, start + timedelta(days=4), "APPROVING", start, None, start, start,
+                source="ADMIN", blocks_calendar=True, admin_override=True, all_day=True,
+            )
+            self.assertEqual(await client.create_event(meeting), "all-day-event")
+            self.assertTrue(captured[0]["allDay"])
+            self.assertEqual(captured[0]["allDayStart"], "2026-08-20")
+            self.assertEqual(captured[0]["allDayEnd"], "2026-08-24")
+
     async def test_manual_self_only_create_has_no_guest_and_can_be_transparent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             secret_file = Path(temporary) / "secret"

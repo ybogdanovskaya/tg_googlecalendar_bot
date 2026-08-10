@@ -107,7 +107,14 @@ function createEvent_(payload) {
       options.guests = String(payload.email).trim();
       options.sendInvites = true;
     }
-    const event = calendar.createEvent(String(payload.subject), start, end, options);
+    const event = payload.allDay
+      ? calendar.createAllDayEvent(
+        String(payload.subject),
+        parseAllDayDate_(payload.allDayStart),
+        parseAllDayDate_(payload.allDayEnd),
+        options,
+      )
+      : calendar.createEvent(String(payload.subject), start, end, options);
     event.setTag('telegram_request_id', String(payload.requestId));
     event.setTransparency(payload.transparent
       ? CalendarApp.EventTransparency.TRANSPARENT
@@ -118,6 +125,12 @@ function createEvent_(payload) {
   } finally {
     lock.releaseLock();
   }
+}
+
+function parseAllDayDate_(value) {
+  const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) throw new Error('all_day_date_required');
+  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
 }
 
 function updateEvent_(payload) {

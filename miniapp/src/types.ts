@@ -14,6 +14,7 @@ export interface BookingConfig {
   step_minutes: number;
   horizon_days: number;
   min_lead_minutes: number;
+  hold_hours: number;
   window: { start_minutes: number; end_minutes: number };
 }
 
@@ -37,6 +38,8 @@ export interface MeetingRequest {
   start_at: string;
   end_at: string;
   duration_minutes: number;
+  all_day: boolean;
+  blocks_calendar: boolean;
   status: string;
   status_label: string;
   reservation: { active: boolean; until: string };
@@ -44,6 +47,11 @@ export interface MeetingRequest {
   open_change: ChangeRequest | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface UserRequests {
+  items: MeetingRequest[];
+  archive: MeetingRequest[];
 }
 
 export interface RequestAlternative {
@@ -107,6 +115,7 @@ export interface AdminSettings {
     durations: number[];
     step_minutes: number;
     user_booking_window: number[];
+    closed_weekdays: number[];
   };
   notifications: {
     reminder_minutes: number[];

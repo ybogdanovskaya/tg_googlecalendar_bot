@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.apps_script_calendar import AppsScriptCalendar
-from app.booking_rules import BOOKING_ENABLED, BOOKING_HORIZON_DAYS, DURATIONS, HOLD_HOURS, MIN_LEAD_MINUTES, STEP_MINUTES, USER_BOOKING_WINDOW, validate_value as validate_booking_setting
+from app.booking_rules import BOOKING_ENABLED, BOOKING_HORIZON_DAYS, CLOSED_WEEKDAYS, DURATIONS, HOLD_HOURS, MIN_LEAD_MINUTES, STEP_MINUTES, USER_BOOKING_WINDOW, validate_value as validate_booking_setting
 from app.calendar_client import CalendarClient, CalendarUnavailable
 from app.config import Settings
 from app.db import Database
@@ -122,6 +122,15 @@ class AdminManualMeetingBody(BaseModel):
     allow_overlap: bool = False
 
 
+class AdminAllDayEventBody(BaseModel):
+    subject: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=4000)
+    location: str | None = Field(default=None, max_length=1000)
+    start_date: date
+    end_date: date
+    blocks_calendar: bool = True
+
+
 class AdminRequestPatchBody(BaseModel):
     name: str | None = Field(default=None, max_length=120)
     email: str | None = Field(default=None, max_length=254)
@@ -212,7 +221,9 @@ def request_view(value: MeetingRequest, timezone_name: str, open_change: ChangeR
     }
     now = datetime.now(UTC)
     actions: list[str] = []
-    if value.status == PENDING:
+    if value.all_day:
+        actions = []
+    elif value.status == PENDING:
         actions = ["EDIT", "CANCEL"]
     elif value.status == APPROVED and value.end_at > now and open_change is None:
         actions = ["REQUEST_RESCHEDULE", "REQUEST_CANCEL"]
@@ -221,6 +232,8 @@ def request_view(value: MeetingRequest, timezone_name: str, open_change: ChangeR
         "email": value.email, "name": value.telegram_name,
         "start_at": value.start_at.astimezone(zone).isoformat(), "end_at": value.end_at.astimezone(zone).isoformat(),
         "duration_minutes": int((value.end_at - value.start_at).total_seconds() // 60),
+        "all_day": value.all_day,
+        "blocks_calendar": value.blocks_calendar,
         "status": value.status, "status_label": labels.get(value.status, "Обновляется"),
         "reservation": {"active": value.status == PENDING and value.hold_until > now, "until": value.hold_until.astimezone(zone).isoformat()},
         "allowed_actions": actions, "open_change": change_view(open_change, timezone_name) if open_change else None,
@@ -550,6 +563,24 @@ def create_app(
         items = await asyncio.to_thread(database.list_admin_meetings, current.telegram_id, 50)
         return {"items": [request_view(item, settings.timezone) for item in items]}
 
+    @app.post("/api/v1/admin/all-day-events")
+    async def admin_create_all_day_event(body: AdminAllDayEventBody, current: Actor = Depends(admin_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
+        try:
+            value = await service.admin_create_all_day_event(
+                admin_id=current.telegram_id,
+                subject=body.subject,
+                description=body.description,
+                location=body.location,
+                start_date=body.start_date,
+                end_date=body.end_date,
+                blocks_calendar=body.blocks_calendar,
+            )
+        except BookingValidationError as exc:
+            raise ApiError(422, "VALIDATION_ERROR", "Проверьте тему и диапазон дат события.") from exc
+        except CalendarUnavailable as exc:
+            raise ApiError(503, "EXTERNAL_UNAVAILABLE", "Календарь временно недоступен.", True) from exc
+        return request_view(value, settings.timezone)
+
     @app.post("/api/v1/admin/manual-meetings/{request_id}/cancel")
     async def admin_cancel_manual_meeting(request_id: int, current: Actor = Depends(admin_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
         try:
@@ -648,13 +679,13 @@ def create_app(
         rules = await asyncio.to_thread(service.rules)
         notifications = await asyncio.to_thread(load_notification_rules, database, settings)
         return {
-            "booking": {"booking_enabled": rules.booking_enabled, "min_lead_minutes": rules.min_lead_minutes, "booking_horizon_days": rules.booking_horizon_days, "hold_hours": rules.hold_hours, "durations": list(rules.durations), "step_minutes": rules.step_minutes, "user_booking_window": [rules.user_booking_start_minutes, rules.user_booking_end_minutes]},
+            "booking": {"booking_enabled": rules.booking_enabled, "min_lead_minutes": rules.min_lead_minutes, "booking_horizon_days": rules.booking_horizon_days, "hold_hours": rules.hold_hours, "durations": list(rules.durations), "step_minutes": rules.step_minutes, "user_booking_window": [rules.user_booking_start_minutes, rules.user_booking_end_minutes], "closed_weekdays": list(rules.closed_weekdays)},
             "notifications": {"reminder_minutes": list(notifications.reminder_minutes), "pending_reminder_hours": notifications.pending_reminder_hours, "automation_enabled": notifications.automation_enabled},
         }
 
     @app.patch("/api/v1/admin/settings")
     async def admin_update_setting(body: AdminSettingBody, current: Actor = Depends(admin_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
-        booking_keys = {BOOKING_ENABLED, MIN_LEAD_MINUTES, BOOKING_HORIZON_DAYS, HOLD_HOURS, DURATIONS, STEP_MINUTES, USER_BOOKING_WINDOW}
+        booking_keys = {BOOKING_ENABLED, MIN_LEAD_MINUTES, BOOKING_HORIZON_DAYS, HOLD_HOURS, DURATIONS, STEP_MINUTES, USER_BOOKING_WINDOW, CLOSED_WEEKDAYS}
         notification_keys = {REMINDER_MINUTES, PENDING_REMINDER_HOURS, AUTOMATION_ENABLED}
         try:
             value = validate_booking_setting(body.key, body.value) if body.key in booking_keys else validate_notification_setting(body.key, body.value) if body.key in notification_keys else None
@@ -667,7 +698,8 @@ def create_app(
 
     @app.get("/api/v1/admin/closed-dates")
     async def admin_closed_dates(_: Actor = Depends(admin_reader)) -> dict[str, Any]:
-        return {"items": await asyncio.to_thread(database.list_closed_dates, None, 365)}
+        rules = await asyncio.to_thread(service.rules)
+        return {"items": await asyncio.to_thread(database.list_closed_dates, None, 365), "weekdays": list(rules.closed_weekdays)}
 
     @app.post("/api/v1/admin/closed-dates")
     async def admin_add_closed_date(body: ClosedDateBody, current: Actor = Depends(admin_actor), _: str = Depends(idempotency_key)) -> dict[str, Any]:
@@ -704,7 +736,7 @@ def create_app(
     @app.get("/api/v1/booking/config")
     async def booking_config(_: Actor = Depends(actor)) -> dict[str, Any]:
         rules = await asyncio.to_thread(service.rules)
-        return {"timezone": settings.timezone, "booking_enabled": rules.booking_enabled, "durations": list(rules.durations), "step_minutes": rules.step_minutes, "horizon_days": rules.booking_horizon_days, "min_lead_minutes": rules.min_lead_minutes, "window": {"start_minutes": rules.user_booking_start_minutes, "end_minutes": rules.user_booking_end_minutes}}
+        return {"timezone": settings.timezone, "booking_enabled": rules.booking_enabled, "durations": list(rules.durations), "step_minutes": rules.step_minutes, "horizon_days": rules.booking_horizon_days, "min_lead_minutes": rules.min_lead_minutes, "hold_hours": rules.hold_hours, "window": {"start_minutes": rules.user_booking_start_minutes, "end_minutes": rules.user_booking_end_minutes}}
 
     @app.get("/api/v1/booking/calendar")
     async def booking_calendar(from_date: str, to_date: str, _: Actor = Depends(actor)) -> dict[str, Any]:
@@ -712,7 +744,8 @@ def create_app(
             start, end = datetime.fromisoformat(from_date).date(), datetime.fromisoformat(to_date).date()
         except ValueError as exc:
             raise ApiError(422, "VALIDATION_ERROR", "Укажите корректный период календаря.") from exc
-        if end < start or (end - start).days > 62:
+        rules = await asyncio.to_thread(service.rules)
+        if end < start or (end - start).days >= rules.booking_horizon_days:
             raise ApiError(422, "VALIDATION_ERROR", "Период календаря недопустим.")
         return await asyncio.to_thread(service.calendar_dates, start, end)
 
@@ -729,8 +762,16 @@ def create_app(
     @app.get("/api/v1/requests")
     async def list_requests(current: Actor = Depends(actor)) -> dict[str, Any]:
         items = await asyncio.to_thread(database.list_user_requests, current.telegram_id, 100)
+        items.reverse()
         open_changes = await asyncio.to_thread(database.list_open_changes_for_requests, [item.id for item in items])
-        return {"items": [request_view(item, settings.timezone, open_changes.get(item.id)) for item in items]}
+        now = datetime.now(UTC)
+        archived_statuses = {REJECTED, CANCELLED, CANCELLED_BY_ADMIN}
+        active = [item for item in items if item.status not in archived_statuses and item.end_at > now]
+        archive = [item for item in items if item not in active]
+        return {
+            "items": [request_view(item, settings.timezone, open_changes.get(item.id)) for item in active],
+            "archive": [request_view(item, settings.timezone, open_changes.get(item.id)) for item in archive],
+        }
 
     @app.get("/api/v1/requests/{request_id}")
     async def get_request(request_id: int, current: Actor = Depends(actor)) -> dict[str, Any]:

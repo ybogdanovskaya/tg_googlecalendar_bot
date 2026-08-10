@@ -39,6 +39,7 @@ OCCURRENCE_MISSING = "MISSING"
 
 JOB_MEETING_REMINDER = "MEETING_REMINDER"
 JOB_PENDING_REMINDER = "PENDING_REMINDER"
+JOB_NEW_REQUEST_NOTIFICATION = "NEW_REQUEST_NOTIFICATION"
 JOB_PENDING = "PENDING"
 JOB_PROCESSING = "PROCESSING"
 JOB_DONE = "DONE"
@@ -71,6 +72,7 @@ class MeetingRequest:
     source: str = "USER"
     blocks_calendar: bool = True
     admin_override: bool = False
+    all_day: bool = False
 
 
 @dataclass(frozen=True)

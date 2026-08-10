@@ -75,7 +75,10 @@ async def run() -> None:
     dispatcher.include_router(create_release_c_router(settings, database, calendar, automation))
     dispatcher.include_router(create_release_b_router(settings, database, calendar, automation))
     dispatcher.include_router(create_router(settings, database, calendar, automation))
-    await configure_bot_menu(bot)
+    if settings.configure_bot_menu:
+        await configure_bot_menu(bot)
+    else:
+        LOGGER.info("bot_menu_configuration_skipped")
     LOGGER.info("bot_starting")
     automation_task = asyncio.create_task(
         automation_loop(bot, automation, calendar, settings),

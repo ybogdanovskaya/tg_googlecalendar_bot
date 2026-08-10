@@ -35,6 +35,17 @@ def _optional_file_setting(name: str, file_name: str) -> str:
     return Path(path).read_text(encoding="utf-8").strip()
 
 
+def _bool(name: str, default: bool) -> bool:
+    value = os.getenv(name, "").strip().lower()
+    if not value:
+        return default
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(f"Недопустимое булево значение настройки {name}")
+
+
 @dataclass(frozen=True)
 class Settings:
     bot_token: str
@@ -50,6 +61,7 @@ class Settings:
     booking_horizon_days: int
     hold_hours: int
     privacy_policy_version: str
+    configure_bot_menu: bool = True
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -66,9 +78,10 @@ class Settings:
             log_path=Path(os.getenv("LOG_PATH", "logs/calendar_bot.jsonl")),
             timezone=os.getenv("TIMEZONE", "Europe/Moscow"),
             min_lead_minutes=int(os.getenv("MIN_LEAD_MINUTES", "120")),
-            booking_horizon_days=int(os.getenv("BOOKING_HORIZON_DAYS", "30")),
+            booking_horizon_days=int(os.getenv("BOOKING_HORIZON_DAYS", "90")),
             hold_hours=int(os.getenv("HOLD_HOURS", "24")),
             privacy_policy_version=os.getenv("PRIVACY_POLICY_VERSION", "2026-08-07"),
+            configure_bot_menu=_bool("BOT_CONFIGURE_MENU", True),
         )
 
     def ensure_directories(self) -> None:

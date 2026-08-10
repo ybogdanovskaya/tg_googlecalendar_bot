@@ -1,7 +1,8 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import App from "./App";
+import App, { MeetingForm } from "./App";
+import type { RequestDraft } from "./types";
 
 const NOW = "2026-08-08T12:00:00+03:00";
 
@@ -18,7 +19,7 @@ function installApi(role: "USER" | "ADMIN", bookingEnabled = true): void {
     const path = String(input);
     if (path.endsWith("/auth/telegram")) return json({ user: { display_name: "Тестовый пользователь", role, consent: { accepted: true, version: "test" } }, csrf_token: "csrf-token", expires_at: NOW });
     if (path.endsWith("/me")) return json({ role, consent: { accepted: true, version: "test" }, timezone: "Europe/Moscow", expires_at: NOW });
-    if (path.endsWith("/booking/config")) return json({ timezone: "Europe/Moscow", booking_enabled: bookingEnabled, durations: [30], step_minutes: 30, horizon_days: 30, min_lead_minutes: 60, window: { start_minutes: 480, end_minutes: 1260 } });
+    if (path.endsWith("/booking/config")) return json({ timezone: "Europe/Moscow", booking_enabled: bookingEnabled, durations: [30], step_minutes: 30, horizon_days: 30, min_lead_minutes: 60, hold_hours: 24, window: { start_minutes: 480, end_minutes: 1260 } });
     if (path.endsWith("/requests")) return json({ items: [] });
     if (path.endsWith("/admin/dashboard")) return json({ pending_requests: 0, pending_changes: 0, statistics: { user_requests: 0, manual_meetings: 0, calendar_meetings: 0, unique_users: 1 } });
     if (path.endsWith("/admin/requests") || path.endsWith("/admin/series") || path.endsWith("/admin/change-requests") || path.endsWith("/admin/manual-meetings") || path.endsWith("/admin/closed-dates")) return json({ items: [] });
@@ -50,8 +51,10 @@ describe("локальный UAT экранов", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Выберите удобное время для встречи" })).toBeInTheDocument();
+    expect(screen.getByText("Календарь встреч Яны Богдановской")).toBeInTheDocument();
+    expect(screen.queryByText("Личный кабинет")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Мои встречи/ }));
-    expect(await screen.findByText("Пока нет заявок на встречу.")).toBeInTheDocument();
+    expect(await screen.findByText("Пока нет актуальных заявок на встречу.")).toBeInTheDocument();
     expect(screen.queryByText("Управление календарём")).not.toBeInTheDocument();
   });
 
@@ -75,5 +78,21 @@ describe("локальный UAT экранов", () => {
     fireEvent.click(adminNavigation);
     expect(await screen.findByRole("heading", { name: "Управление календарём" })).toBeInTheDocument();
     expect(await screen.findByText("Google Calendar доступен.")).toBeInTheDocument();
+    expect(screen.queryByText("Пользовательский режим")).not.toBeInTheDocument();
+  });
+
+  it("объясняет, какие обязательные поля не заполнены на пятом шаге", () => {
+    const draft: RequestDraft = { durationMinutes: 30, date: "2026-08-20", slot: "2026-08-20T12:00:00+03:00", name: "", email: "", subject: "", description: "", location: "" };
+    const onNext = vi.fn();
+    render(<MeetingForm draft={draft} onChange={vi.fn()} onNext={onNext} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Продолжить" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Заполните обязательные поля");
+    expect(screen.getByText("Укажите имя.")).toBeInTheDocument();
+    expect(screen.getByText("Укажите e-mail.")).toBeInTheDocument();
+    expect(screen.getByText("Укажите тему встречи.")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: /Имя/ })).toHaveAttribute("aria-invalid", "true");
+    expect(onNext).not.toHaveBeenCalled();
   });
 });

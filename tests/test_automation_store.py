@@ -151,6 +151,34 @@ class AutomationStoreTests(unittest.TestCase):
             status = connection.execute("SELECT status FROM scheduled_jobs WHERE id = ?", (claimed[0].id,)).fetchone()[0]
         self.assertEqual(status, JOB_DONE)
 
+    def test_all_day_event_gets_one_day_before_reminder(self) -> None:
+        now = datetime(2026, 8, 7, 9, 0, tzinfo=UTC)
+        self.db.upsert_user(1, "Admin", "admin")
+        request = self.db.create_admin_draft(
+            admin_id=1,
+            admin_name="Admin",
+            admin_username="admin",
+            email=None,
+            subject="All day",
+            description=None,
+            location=None,
+            start_at=now + timedelta(days=3),
+            end_at=now + timedelta(days=5),
+            blocks_calendar=False,
+            allow_overlap=False,
+            all_day=True,
+        )
+        self.db.complete_approval(request.id, 1, "all-day-id")
+        self.assertEqual(self.store.rebuild_request_reminders(request.id, 1, (60, 5), now), 1)
+        with self.db._connect() as connection:
+            rows = connection.execute(
+                "SELECT recipient_telegram_id, due_at FROM scheduled_jobs WHERE request_id = ?",
+                (request.id,),
+            ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["recipient_telegram_id"], 1)
+        self.assertEqual(rows[0]["due_at"], (now + timedelta(days=2, hours=-3)).isoformat())
+
     def test_failed_job_is_retried_without_duplicate_delivery(self) -> None:
         now = datetime(2026, 8, 7, 9, 0, tzinfo=UTC)
         request = self.approved_request(now + timedelta(hours=1))

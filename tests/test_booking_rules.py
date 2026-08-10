@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.booking_rules import (
+    CLOSED_WEEKDAYS,
     DURATIONS,
     MIN_LEAD_MINUTES,
     USER_BOOKING_WINDOW,
@@ -13,6 +14,8 @@ from app.booking_rules import (
     parse_booking_window,
     validate_value,
 )
+from datetime import date
+from app.booking_rules import is_closed_date
 from app.db import Database
 
 
@@ -63,6 +66,13 @@ class BookingRulesTests(unittest.TestCase):
     def test_booking_window_rejects_reversed_range(self) -> None:
         with self.assertRaises(ValueError):
             parse_booking_window("2100-0800")
+
+    def test_weekend_rules_are_loaded_and_close_matching_dates(self) -> None:
+        self.db.set_setting(CLOSED_WEEKDAYS, [5, 6], 1)
+        rules = load_rules(self.db, self.settings)
+        self.assertTrue(is_closed_date(date(2026, 8, 8), set(), rules))
+        self.assertTrue(is_closed_date(date(2026, 8, 9), set(), rules))
+        self.assertFalse(is_closed_date(date(2026, 8, 10), set(), rules))
 
 
 if __name__ == "__main__":

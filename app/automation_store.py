@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from typing import Iterable
+from zoneinfo import ZoneInfo
 
 from app.db import Database, RequestNotEditableError, SlotConflictError, _dt, _iso
 from app.models import (
@@ -17,6 +18,7 @@ from app.models import (
     JOB_DONE,
     JOB_FAILED,
     JOB_MEETING_REMINDER,
+    JOB_NEW_REQUEST_NOTIFICATION,
     JOB_PENDING,
     JOB_PENDING_REMINDER,
     JOB_PROCESSING,
@@ -431,13 +433,29 @@ class AutomationStore:
             self._cancel_jobs_for_request(connection, request_id, _iso(current), JOB_MEETING_REMINDER)
             count = 0
             if request and request.status == APPROVED and request.start_at > current:
+                if request.all_day:
+                    local_start = request.start_at.astimezone(ZoneInfo("Europe/Moscow"))
+                    schedules = [
+                        (
+                            "all-day-0900",
+                            datetime.combine(
+                                local_start.date() - timedelta(days=1),
+                                time(9, 0),
+                                tzinfo=ZoneInfo("Europe/Moscow"),
+                            ).astimezone(UTC),
+                        )
+                    ]
+                else:
+                    schedules = [
+                        (str(int(minutes)), request.start_at - timedelta(minutes=int(minutes)))
+                        for minutes in reminder_minutes
+                    ]
                 recipients = {request.telegram_id, admin_id}
                 for recipient in recipients:
-                    for minutes in reminder_minutes:
-                        due = request.start_at - timedelta(minutes=int(minutes))
+                    for schedule_key, due in schedules:
                         if due < current:
                             due = current
-                        key = f"meeting:{request.id}:{request.start_at.isoformat()}:{recipient}:{int(minutes)}"
+                        key = f"meeting:{request.id}:{request.start_at.isoformat()}:{recipient}:{schedule_key}"
                         count += self._insert_job(
                             connection,
                             JOB_MEETING_REMINDER,
@@ -511,6 +529,30 @@ class AutomationStore:
         key = f"pending:{request.id}:{due.isoformat()}:{admin_id}"
         with self.db._connect() as connection:
             return self._insert_job(connection, JOB_PENDING_REMINDER, request.id, None, admin_id, due, key, current)
+
+    def ensure_new_request_notification(
+        self,
+        request_id: int,
+        admin_id: int,
+        now: datetime | None = None,
+    ) -> int:
+        """Schedule one immediate, idempotent notification for a new request."""
+        current = now or datetime.now(UTC)
+        request = self.db.get_request(request_id)
+        if request is None or request.status != PENDING:
+            return 0
+        key = f"new-request:{request.id}:{admin_id}"
+        with self.db._connect() as connection:
+            return self._insert_job(
+                connection,
+                JOB_NEW_REQUEST_NOTIFICATION,
+                request.id,
+                None,
+                admin_id,
+                current,
+                key,
+                current,
+            )
 
     def schedule_next_pending_reminder(
         self,

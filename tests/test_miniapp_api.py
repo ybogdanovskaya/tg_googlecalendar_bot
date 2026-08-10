@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.db import Database
 from app.miniapp_api import ApiError, create_app, load_local_env, validate_telegram_init_data
-from app.miniapp_services import MiniAppBookingService
+from app.miniapp_services import BookingValidationError, MiniAppBookingService
 from app.models import CHANGE_CANCEL
 from app.release_d_store import DELETE_COMPLETED, DELETE_KEEP_FUTURE
 
@@ -65,7 +65,7 @@ class MiniAppApiTests(unittest.IsolatedAsyncioTestCase):
             log_path=Path(self.temporary.name) / "miniapp.jsonl",
             timezone="Europe/Moscow",
             min_lead_minutes=120,
-            booking_horizon_days=30,
+            booking_horizon_days=90,
             hold_hours=24,
             privacy_policy_version="test-v1",
         )
@@ -142,6 +142,25 @@ class MiniAppApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(replayed_second)
         self.assertEqual(first.id, second.id)
 
+    async def test_request_rejects_email_instead_of_name(self) -> None:
+        zone = ZoneInfo("Europe/Moscow")
+        start = datetime.combine(datetime.now(zone).date() + timedelta(days=3), clock_time(11, 0), zone)
+
+        with self.assertRaisesRegex(BookingValidationError, "invalid name"):
+            await self.service.create_request(
+                telegram_id=100,
+                telegram_name="Tester",
+                telegram_username="tester",
+                name="test@example.com",
+                email="test@example.com",
+                subject="Проверка",
+                description=None,
+                location=None,
+                start_at=start,
+                duration_minutes=30,
+                idempotency_key="z" * 24,
+            )
+
     def test_http_authentication_session_and_csrf(self) -> None:
         app = create_app(self.settings, self.database, FreeCalendar(), cookie_secure=False)
         with TestClient(app) as client:
@@ -173,6 +192,62 @@ class MiniAppApiTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(wrong_origin.status_code, 403)
             self.assertEqual(wrong_origin.json()["error"]["code"], "CSRF_INVALID")
+
+    def test_user_requests_separate_past_records_into_archive(self) -> None:
+        now = datetime.now(ZoneInfo("UTC"))
+        active = self.database.create_request(
+            telegram_id=100, telegram_name="Tester", telegram_username="tester", email="test@example.com",
+            subject="Будущая встреча", description=None, location=None,
+            start_at=now + timedelta(days=3), end_at=now + timedelta(days=3, minutes=30), hold_hours=24,
+        )
+        archived = self.database.create_request(
+            telegram_id=100, telegram_name="Tester", telegram_username="tester", email="test@example.com",
+            subject="Прошедшая встреча", description=None, location=None,
+            start_at=now - timedelta(days=2), end_at=now - timedelta(days=2, minutes=30), hold_hours=24,
+        )
+        app = create_app(self.settings, self.database, FreeCalendar(), cookie_secure=False)
+        with TestClient(app) as client:
+            client.post("/api/v1/auth/telegram", json={"init_data": self._signed_init_data(100)})
+            payload = client.get("/api/v1/requests").json()
+        self.assertEqual([item["id"] for item in payload["items"]], [str(active.id)])
+        self.assertEqual([item["id"] for item in payload["archive"]], [str(archived.id)])
+
+    def test_user_requests_show_latest_created_first(self) -> None:
+        now = datetime.now(ZoneInfo("UTC"))
+        first = self.database.create_request(
+            telegram_id=100, telegram_name="Tester", telegram_username="tester", email="test@example.com",
+            subject="First", description=None, location=None,
+            start_at=now + timedelta(days=5), end_at=now + timedelta(days=5, minutes=30), hold_hours=24,
+        )
+        latest = self.database.create_request(
+            telegram_id=100, telegram_name="Tester", telegram_username="tester", email="test@example.com",
+            subject="Latest", description=None, location=None,
+            start_at=now + timedelta(days=2), end_at=now + timedelta(days=2, minutes=30), hold_hours=24,
+        )
+        app = create_app(self.settings, self.database, FreeCalendar(), cookie_secure=False)
+        with TestClient(app) as client:
+            client.post("/api/v1/auth/telegram", json={"init_data": self._signed_init_data(100)})
+            payload = client.get("/api/v1/requests").json()
+        self.assertEqual([item["id"] for item in payload["items"]], [str(latest.id), str(first.id)])
+
+    def test_calendar_allows_the_confirmed_ninety_day_horizon(self) -> None:
+        today = datetime.now(ZoneInfo("Europe/Moscow")).date()
+        app = create_app(self.settings, self.database, FreeCalendar(), cookie_secure=False)
+        with TestClient(app) as client:
+            client.post("/api/v1/auth/telegram", json={"init_data": self._signed_init_data(100)})
+            config = client.get("/api/v1/booking/config")
+            allowed = client.get(
+                "/api/v1/booking/calendar",
+                params={"from_date": today.isoformat(), "to_date": (today + timedelta(days=89)).isoformat()},
+            )
+            too_long = client.get(
+                "/api/v1/booking/calendar",
+                params={"from_date": today.isoformat(), "to_date": (today + timedelta(days=90)).isoformat()},
+            )
+        self.assertEqual(config.status_code, 200)
+        self.assertEqual(config.json()["hold_hours"], 24)
+        self.assertEqual(allowed.status_code, 200)
+        self.assertEqual(too_long.status_code, 422)
 
     def test_admin_routes_require_server_side_admin_role(self) -> None:
         app = create_app(self.settings, self.database, FreeCalendar(), cookie_secure=False)
@@ -254,6 +329,7 @@ class MiniAppApiTests(unittest.IsolatedAsyncioTestCase):
             settings = client.get("/api/v1/admin/settings")
             self.assertEqual(settings.status_code, 200)
             self.assertTrue(settings.json()["booking"]["booking_enabled"])
+            self.assertEqual(settings.json()["booking"]["closed_weekdays"], [])
             updated = client.patch(
                 "/api/v1/admin/settings",
                 json={"key": "booking_enabled", "value": False},
@@ -262,6 +338,22 @@ class MiniAppApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(updated.status_code, 200)
             self.assertFalse(updated.json()["value"])
 
+            weekends = client.patch(
+                "/api/v1/admin/settings",
+                json={"key": "closed_weekdays", "value": [5, 6]},
+                headers={**headers, "Idempotency-Key": "q" * 24},
+            )
+            self.assertEqual(weekends.status_code, 200)
+            self.assertEqual(weekends.json()["value"], [5, 6])
+
+            booking_window = client.patch(
+                "/api/v1/admin/settings",
+                json={"key": "user_booking_window", "value": [9 * 60, 20 * 60 + 30]},
+                headers={**headers, "Idempotency-Key": "w" * 24},
+            )
+            self.assertEqual(booking_window.status_code, 200)
+            self.assertEqual(booking_window.json()["value"], [540, 1230])
+
             added = client.post(
                 "/api/v1/admin/closed-dates",
                 json={"date": "2099-01-01"},
@@ -269,7 +361,9 @@ class MiniAppApiTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(added.status_code, 200)
             self.assertTrue(added.json()["added"])
-            self.assertIn("2099-01-01", client.get("/api/v1/admin/closed-dates").json()["items"])
+            closed_dates = client.get("/api/v1/admin/closed-dates").json()
+            self.assertIn("2099-01-01", closed_dates["items"])
+            self.assertEqual(closed_dates["weekdays"], [5, 6])
             removed = client.delete(
                 "/api/v1/admin/closed-dates/2099-01-01",
                 headers={**headers, "Idempotency-Key": "n" * 24},
@@ -311,6 +405,59 @@ class MiniAppApiTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(cancelled.status_code, 200)
             self.assertEqual(cancelled.json()["status"], "CANCELLED_BY_ADMIN")
+
+    def test_admin_can_create_all_day_event_with_optional_calendar_block(self) -> None:
+        today = datetime.now(ZoneInfo("Europe/Moscow")).date()
+        app = create_app(self.settings, self.database, FreeCalendar(), cookie_secure=False)
+        with TestClient(app) as client:
+            csrf = client.post("/api/v1/auth/telegram", json={"init_data": self._signed_init_data(1)}).json()["csrf_token"]
+            created = client.post(
+                "/api/v1/admin/all-day-events",
+                json={
+                    "subject": "Отпуск",
+                    "start_date": (today + timedelta(days=5)).isoformat(),
+                    "end_date": (today + timedelta(days=8)).isoformat(),
+                },
+                headers={"X-CSRF-Token": csrf, "Idempotency-Key": "a" * 24},
+            )
+            self.assertEqual(created.status_code, 200)
+            self.assertTrue(created.json()["all_day"])
+            self.assertEqual(created.json()["allowed_actions"], [])
+            self.assertEqual(created.json()["duration_minutes"], 4 * 24 * 60)
+            with self.database._connect() as connection:
+                scheduled = connection.execute(
+                    "SELECT COUNT(*) FROM scheduled_jobs WHERE request_id = ? AND job_type = 'MEETING_REMINDER'",
+                    (created.json()["id"],),
+                ).fetchone()[0]
+            self.assertEqual(scheduled, 1)
+            self.assertTrue(self.database.active_intervals(
+                datetime.combine(today + timedelta(days=6), clock_time(10, 0), ZoneInfo("Europe/Moscow")).astimezone(ZoneInfo("UTC")),
+                datetime.combine(today + timedelta(days=6), clock_time(11, 0), ZoneInfo("Europe/Moscow")).astimezone(ZoneInfo("UTC")),
+            ))
+            self.assertEqual(
+                client.post(
+                    f"/api/v1/admin/manual-meetings/{created.json()['id']}/cancel",
+                    headers={"X-CSRF-Token": csrf, "Idempotency-Key": "b" * 24},
+                ).status_code,
+                200,
+            )
+            nonblocking = client.post(
+                "/api/v1/admin/all-day-events",
+                json={
+                    "subject": "Каникулы детей",
+                    "start_date": (today + timedelta(days=10)).isoformat(),
+                    "end_date": (today + timedelta(days=11)).isoformat(),
+                    "blocks_calendar": False,
+                },
+                headers={"X-CSRF-Token": csrf, "Idempotency-Key": "c" * 24},
+            )
+            self.assertEqual(nonblocking.status_code, 200)
+            self.assertTrue(nonblocking.json()["all_day"])
+            self.assertFalse(nonblocking.json()["blocks_calendar"])
+            self.assertFalse(self.database.active_intervals(
+                datetime.combine(today + timedelta(days=10), clock_time(10, 0), ZoneInfo("Europe/Moscow")).astimezone(ZoneInfo("UTC")),
+                datetime.combine(today + timedelta(days=10), clock_time(11, 0), ZoneInfo("Europe/Moscow")).astimezone(ZoneInfo("UTC")),
+            ))
 
     def test_admin_can_create_and_cancel_series(self) -> None:
         zone = ZoneInfo("Europe/Moscow")

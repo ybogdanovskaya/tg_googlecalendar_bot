@@ -15,6 +15,7 @@ from app.config import Settings
 from app.models import (
     APPROVED,
     JOB_MEETING_REMINDER,
+    JOB_NEW_REQUEST_NOTIFICATION,
     JOB_PENDING_REMINDER,
     OCCURRENCE_MOVED,
     OCCURRENCE_SCHEDULED,
@@ -29,9 +30,19 @@ SYNC_SECONDS = 15 * 60
 BOOTSTRAP_SECONDS = 60 * 60
 
 
-def _meeting_text(subject: str, start_at: datetime, location: str | None, timezone_name: str) -> str:
+def _meeting_text(
+    subject: str,
+    start_at: datetime,
+    location: str | None,
+    timezone_name: str,
+    *,
+    all_day: bool = False,
+) -> str:
     start = start_at.astimezone(ZoneInfo(timezone_name))
-    text = f"⏰ <b>Напоминание о встрече</b>\n\n{start:%d.%m.%Y %H:%M} (МСК)\n{html.escape(subject)}"
+    if all_day:
+        text = f"⏰ <b>Напоминание о событии</b>\n\n{start:%d.%m.%Y}\n{html.escape(subject)}"
+    else:
+        text = f"⏰ <b>Напоминание о встрече</b>\n\n{start:%d.%m.%Y %H:%M} (МСК)\n{html.escape(subject)}"
     if location:
         text += f"\nМесто/ссылка: {html.escape(location)}"
     return text
@@ -54,7 +65,13 @@ async def process_due_jobs(
                     if request.status != APPROVED or request.start_at <= current:
                         await asyncio.to_thread(store.complete_job, job.id, current)
                         continue
-                    text = _meeting_text(request.subject, request.start_at, request.location, settings.timezone)
+                    text = _meeting_text(
+                        request.subject,
+                        request.start_at,
+                        request.location,
+                        settings.timezone,
+                        all_day=request.all_day,
+                    )
                 elif occurrence and series:
                     if occurrence.status not in {OCCURRENCE_SCHEDULED, OCCURRENCE_MOVED} or occurrence.actual_start_at <= current:
                         await asyncio.to_thread(store.complete_job, job.id, current)
@@ -73,6 +90,19 @@ async def process_due_jobs(
                     job.recipient_telegram_id,
                     f"📌 <b>Заявка №{request.id} всё ещё ожидает решения</b>\n"
                     f"{start:%d.%m.%Y %H:%M} (МСК)",
+                )
+            elif job.job_type == JOB_NEW_REQUEST_NOTIFICATION:
+                if request is None or request.status != PENDING:
+                    await asyncio.to_thread(store.complete_job, job.id, current)
+                    continue
+                start = request.start_at.astimezone(ZoneInfo(settings.timezone))
+                await bot.send_message(
+                    job.recipient_telegram_id,
+                    "📬 <b>Новая заявка на согласование</b>\n\n"
+                    f"{html.escape(request.telegram_name)} · {html.escape(request.email)}\n"
+                    f"{html.escape(request.subject)}\n"
+                    f"{start:%d.%m.%Y %H:%M} (МСК)\n\n"
+                    "Откройте раздел «Заявки на рассмотрении» в боте или управление календарём в Mini App.",
                 )
             else:
                 await asyncio.to_thread(store.complete_job, job.id, current)

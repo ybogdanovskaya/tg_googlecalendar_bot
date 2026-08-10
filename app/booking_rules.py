@@ -15,6 +15,7 @@ HOLD_HOURS = "hold_hours"
 DURATIONS = "durations"
 STEP_MINUTES = "step_minutes"
 USER_BOOKING_WINDOW = "user_booking_window"
+CLOSED_WEEKDAYS = "closed_weekdays"
 
 ALLOWED_DURATIONS = (15, 30, 45, 60, 90)
 ALLOWED_STEPS = (5, 10, 15, 30, 60)
@@ -30,6 +31,7 @@ class BookingRules:
     step_minutes: int
     user_booking_start_minutes: int
     user_booking_end_minutes: int
+    closed_weekdays: tuple[int, ...]
 
 
 def defaults(settings: Settings) -> dict[str, Any]:
@@ -41,6 +43,7 @@ def defaults(settings: Settings) -> dict[str, Any]:
         DURATIONS: list(ALLOWED_DURATIONS),
         STEP_MINUTES: 15,
         USER_BOOKING_WINDOW: [8 * 60, 21 * 60],
+        CLOSED_WEEKDAYS: [],
     }
 
 
@@ -115,6 +118,13 @@ def validate_value(key: str, value: Any) -> Any:
         if not 0 <= start < end <= 24 * 60:
             raise ValueError("Начало должно быть раньше окончания")
         return [start, end]
+    if key == CLOSED_WEEKDAYS:
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("Нужен список дней недели")
+        normalized = tuple(sorted({int(item) for item in value}))
+        if any(item not in range(7) for item in normalized):
+            raise ValueError("Допустимы дни недели от 0 до 6")
+        return list(normalized)
     raise ValueError("Неизвестная настройка")
 
 
@@ -137,4 +147,10 @@ def load_rules(db: Database, settings: Settings) -> BookingRules:
         step_minutes=int(values[STEP_MINUTES]),
         user_booking_start_minutes=int(booking_window[0]),
         user_booking_end_minutes=int(booking_window[1]),
+        closed_weekdays=tuple(int(item) for item in values[CLOSED_WEEKDAYS]),
     )
+
+
+def is_closed_date(selected_date: Any, closed_dates: set[str], rules: BookingRules) -> bool:
+    """Return whether a date is closed by an explicit exception or weekday rule."""
+    return selected_date.isoformat() in closed_dates or selected_date.weekday() in rules.closed_weekdays
