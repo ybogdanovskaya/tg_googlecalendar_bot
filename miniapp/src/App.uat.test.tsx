@@ -1,7 +1,8 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import App from "./App";
+import App, { MeetingForm } from "./App";
+import type { RequestDraft } from "./types";
 
 const NOW = "2026-08-08T12:00:00+03:00";
 
@@ -75,5 +76,20 @@ describe("локальный UAT экранов", () => {
     fireEvent.click(adminNavigation);
     expect(await screen.findByRole("heading", { name: "Управление календарём" })).toBeInTheDocument();
     expect(await screen.findByText("Google Calendar доступен.")).toBeInTheDocument();
+  });
+
+  it("объясняет, какие обязательные поля не заполнены на пятом шаге", () => {
+    const draft: RequestDraft = { durationMinutes: 30, date: "2026-08-20", slot: "2026-08-20T12:00:00+03:00", name: "", email: "", subject: "", description: "", location: "" };
+    const onNext = vi.fn();
+    render(<MeetingForm draft={draft} onChange={vi.fn()} onNext={onNext} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Продолжить" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Заполните обязательные поля");
+    expect(screen.getByText("Укажите имя.")).toBeInTheDocument();
+    expect(screen.getByText("Укажите e-mail.")).toBeInTheDocument();
+    expect(screen.getByText("Укажите тему встречи.")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: /Имя/ })).toHaveAttribute("aria-invalid", "true");
+    expect(onNext).not.toHaveBeenCalled();
   });
 });

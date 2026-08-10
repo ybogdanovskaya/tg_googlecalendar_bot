@@ -668,7 +668,7 @@ function MonthCalendar({
   );
 }
 
-function MeetingForm({
+export function MeetingForm({
   draft,
   onChange,
   onNext,
@@ -677,23 +677,41 @@ function MeetingForm({
   onChange: (value: RequestDraft) => void;
   onNext: () => void;
 }) {
-  const valid =
-    draft.name.trim() &&
-    !draft.name.includes("@") &&
-    /^\S+@\S+\.\S+$/.test(draft.email) &&
-    draft.subject.trim();
+  const [submitted, setSubmitted] = useState(false);
+  const errors = {
+    name: !draft.name.trim()
+      ? "Укажите имя."
+      : draft.name.includes("@")
+        ? "Укажите имя, а не e-mail."
+        : "",
+    email: !draft.email.trim()
+      ? "Укажите e-mail."
+      : !/^\S+@\S+\.\S+$/.test(draft.email)
+        ? "Введите e-mail в корректном формате."
+        : "",
+    subject: !draft.subject.trim() ? "Укажите тему встречи." : "",
+  };
+  const valid = !errors.name && !errors.email && !errors.subject;
   const update = (field: keyof RequestDraft, value: string) =>
     onChange({ ...draft, [field]: value });
   return (
     <form
       className="form"
+      noValidate
       onSubmit={(event) => {
         event.preventDefault();
+        setSubmitted(true);
         if (valid) onNext();
       }}
     >
+      <p className="form-hint">Поля со звёздочкой обязательны.</p>
+      {submitted && !valid && (
+        <p className="form-validation-summary" role="alert">
+          Заполните обязательные поля, отмеченные ниже.
+        </p>
+      )}
       <label>
-        Имя
+        Имя <b aria-hidden="true">*</b>
         <input
           name="requester_name"
           autoComplete="name"
@@ -701,10 +719,14 @@ function MeetingForm({
           maxLength={120}
           onChange={(event) => update("name", event.target.value)}
           required
+          className={submitted && errors.name ? "field-error" : ""}
+          aria-invalid={Boolean(submitted && errors.name)}
+          aria-describedby={submitted && errors.name ? "requester-name-error" : undefined}
         />
+        {submitted && errors.name && <small id="requester-name-error">{errors.name}</small>}
       </label>
       <label>
-        Email
+        Email <b aria-hidden="true">*</b>
         <input
           name="email"
           autoComplete="email"
@@ -714,16 +736,24 @@ function MeetingForm({
           maxLength={254}
           onChange={(event) => update("email", event.target.value)}
           required
+          className={submitted && errors.email ? "field-error" : ""}
+          aria-invalid={Boolean(submitted && errors.email)}
+          aria-describedby={submitted && errors.email ? "email-error" : undefined}
         />
+        {submitted && errors.email && <small id="email-error">{errors.email}</small>}
       </label>
       <label>
-        Тема встречи
+        Тема встречи <b aria-hidden="true">*</b>
         <input
           value={draft.subject}
           maxLength={200}
           onChange={(event) => update("subject", event.target.value)}
           required
+          className={submitted && errors.subject ? "field-error" : ""}
+          aria-invalid={Boolean(submitted && errors.subject)}
+          aria-describedby={submitted && errors.subject ? "subject-error" : undefined}
         />
+        {submitted && errors.subject && <small id="subject-error">{errors.subject}</small>}
       </label>
       <label>
         Описание <span>необязательно</span>
@@ -741,7 +771,7 @@ function MeetingForm({
           onChange={(event) => update("location", event.target.value)}
         />
       </label>
-      <button className="button primary" disabled={!valid}>
+      <button className="button primary">
         Продолжить
       </button>
     </form>
