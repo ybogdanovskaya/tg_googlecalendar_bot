@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from app.apps_script_calendar import AppsScriptCalendar
+from app.calendar_client import CalendarUnavailable
 
 
 def verify_sqlite(path: Path, immutable: bool = False) -> None:
@@ -38,15 +39,53 @@ def newest_backup(directory: Path, max_age_hours: int) -> Path:
     return latest
 
 
-async def verify_apps_script(url_file: Path, secret_file: Path) -> None:
+async def verify_apps_script(
+    url_file: Path,
+    secret_file: Path,
+    attempts: int = 3,
+    retry_delay_seconds: float = 2,
+) -> None:
     if not url_file.exists() or not secret_file.exists():
         raise RuntimeError("apps_script_configuration_missing")
     url = url_file.read_text(encoding="utf-8").strip()
     if not url:
         raise RuntimeError("apps_script_url_empty")
     client = AppsScriptCalendar(url, secret_file)
-    now = datetime.now(UTC)
-    await client.busy(now, now + timedelta(minutes=1))
+    if attempts < 1:
+        raise ValueError("apps_script_attempts_must_be_positive")
+    for attempt in range(attempts):
+        now = datetime.now(UTC)
+        try:
+            await client.busy(now, now + timedelta(minutes=1))
+            return
+        except CalendarUnavailable:
+            if attempt == attempts - 1:
+                raise
+            await asyncio.sleep(retry_delay_seconds * (attempt + 1))
+
+
+def alert_is_new(state_file: Path | None, failures: list[str]) -> bool:
+    """Remember the current failure signature so an outage produces one alert."""
+    if state_file is None:
+        return True
+    signature = "\n".join(sorted(failures))
+    try:
+        if state_file.read_text(encoding="utf-8") == signature:
+            return False
+    except FileNotFoundError:
+        pass
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text(signature, encoding="utf-8")
+    return True
+
+
+def clear_alert_state(state_file: Path | None) -> None:
+    if state_file is None:
+        return
+    try:
+        state_file.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def send_alert(token_file: Path | None, admin_id: int | None, failures: list[str]) -> None:
@@ -74,8 +113,11 @@ def main() -> None:
     parser.add_argument("--min-free-bytes", type=int, default=2_000_000_000)
     parser.add_argument("--apps-script-url-file", type=Path)
     parser.add_argument("--apps-script-secret-file", type=Path)
+    parser.add_argument("--apps-script-attempts", type=int, default=3)
+    parser.add_argument("--apps-script-retry-delay-seconds", type=float, default=2)
     parser.add_argument("--alert-token-file", type=Path)
     parser.add_argument("--admin-id", type=int)
+    parser.add_argument("--alert-state-file", type=Path)
     args = parser.parse_args()
 
     checks: dict[str, object] = {}
@@ -107,7 +149,14 @@ def main() -> None:
 
     if args.apps_script_url_file and args.apps_script_secret_file:
         try:
-            asyncio.run(verify_apps_script(args.apps_script_url_file, args.apps_script_secret_file))
+            asyncio.run(
+                verify_apps_script(
+                    args.apps_script_url_file,
+                    args.apps_script_secret_file,
+                    args.apps_script_attempts,
+                    args.apps_script_retry_delay_seconds,
+                )
+            )
             checks["apps_script"] = "ok"
         except Exception as exc:
             failures.append(f"apps_script:{type(exc).__name__}")
@@ -116,8 +165,10 @@ def main() -> None:
     payload = {"ok": not failures, "checks": checks, "failures": failures}
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
     if failures:
-        send_alert(args.alert_token_file, args.admin_id, failures)
+        if alert_is_new(args.alert_state_file, failures):
+            send_alert(args.alert_token_file, args.admin_id, failures)
         raise SystemExit(1)
+    clear_alert_state(args.alert_state_file)
 
 
 if __name__ == "__main__":
