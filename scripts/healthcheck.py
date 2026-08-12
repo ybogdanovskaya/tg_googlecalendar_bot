@@ -42,7 +42,7 @@ def newest_backup(directory: Path, max_age_hours: int) -> Path:
 async def verify_apps_script(
     url_file: Path,
     secret_file: Path,
-    attempts: int = 3,
+    attempts: int = 5,
     retry_delay_seconds: float = 2,
 ) -> None:
     if not url_file.exists() or not secret_file.exists():
@@ -113,7 +113,7 @@ def main() -> None:
     parser.add_argument("--min-free-bytes", type=int, default=2_000_000_000)
     parser.add_argument("--apps-script-url-file", type=Path)
     parser.add_argument("--apps-script-secret-file", type=Path)
-    parser.add_argument("--apps-script-attempts", type=int, default=3)
+    parser.add_argument("--apps-script-attempts", type=int, default=5)
     parser.add_argument("--apps-script-retry-delay-seconds", type=float, default=2)
     parser.add_argument("--alert-token-file", type=Path)
     parser.add_argument("--admin-id", type=int)
